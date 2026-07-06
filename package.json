@@ -1,0 +1,23 @@
+{
+  "name": "binotel-call-analyzer",
+  "version": "1.0.0",
+  "description": "Polls Binotel for new calls, transcribes and stores them, and sends a daily AI-analyzed report per manager to Telegram",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "poll": "cross-env JOB_TYPE=poll node src/index.js",
+    "report": "cross-env JOB_TYPE=report node src/index.js",
+    "test:call": "node src/testSingleCall.js",
+    "backfill": "node src/backfill.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "pg": "^8.21.0"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3"
+  }
+}
