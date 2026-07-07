@@ -1,5 +1,8 @@
 const { withRetry } = require('./retry');
 
+const TELEGRAM_MAX_LENGTH = 4096;
+const CHUNK_TARGET_LENGTH = 3800; // margin below the hard limit for safety
+
 async function rawSend(token, chatId, text, parseMode) {
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
@@ -8,6 +11,43 @@ async function rawSend(token, chatId, text, parseMode) {
   });
   if (!res.ok) {
     throw new Error(`Telegram sendMessage failed: ${res.status} ${await res.text()}`);
+  }
+}
+
+// Telegram hard-caps messages at 4096 chars - split on paragraph/line breaks so we don't
+// cut a sentence (or a markdown entity) in half whenever possible.
+function splitMessage(text) {
+  if (text.length <= TELEGRAM_MAX_LENGTH) return [text];
+
+  const chunks = [];
+  let remaining = text;
+  while (remaining.length > TELEGRAM_MAX_LENGTH) {
+    let splitAt = remaining.lastIndexOf('\n\n', CHUNK_TARGET_LENGTH);
+    if (splitAt <= 0) splitAt = remaining.lastIndexOf('\n', CHUNK_TARGET_LENGTH);
+    if (splitAt <= 0) splitAt = CHUNK_TARGET_LENGTH;
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt).trimStart();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+
+async function sendChunk(token, chatId, text) {
+  try {
+    await withRetry(() => rawSend(token, chatId, text, 'Markdown'), {
+      attempts: 2,
+      delayMs: 1000,
+      label: 'telegram send (markdown)',
+    });
+    console.log('[telegram] sent (markdown)');
+  } catch (err) {
+    console.error(`[telegram] markdown send failed, falling back to plain text: ${err.message}`);
+    await withRetry(() => rawSend(token, chatId, text, undefined), {
+      attempts: 2,
+      delayMs: 1000,
+      label: 'telegram send (plain)',
+    });
+    console.log('[telegram] sent (plain text fallback)');
   }
 }
 
@@ -22,22 +62,44 @@ async function sendMessage(text, { chatId } = {}) {
     return;
   }
 
-  try {
-    await withRetry(() => rawSend(token, targetChatId, text, 'Markdown'), {
-      attempts: 2,
-      delayMs: 1000,
-      label: 'telegram send (markdown)',
-    });
-    console.log('[telegram] sent (markdown)');
-  } catch (err) {
-    console.error(`[telegram] markdown send failed, falling back to plain text: ${err.message}`);
-    await withRetry(() => rawSend(token, targetChatId, text, undefined), {
-      attempts: 2,
-      delayMs: 1000,
-      label: 'telegram send (plain)',
-    });
-    console.log('[telegram] sent (plain text fallback)');
+  const chunks = splitMessage(text);
+  if (chunks.length > 1) {
+    console.log(`[telegram] message is ${text.length} chars, splitting into ${chunks.length} messages`);
   }
+  for (const [i, chunk] of chunks.entries()) {
+    const prefix = chunks.length > 1 ? `(${i + 1}/${chunks.length})\n` : '';
+    await sendChunk(token, targetChatId, prefix + chunk);
+  }
+}
+
+async function sendDocument(buffer, filename, caption) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+
+  if (!token || !chatId) {
+    console.log(`[telegram] DRY RUN - would send document "${filename}" (${buffer.length} bytes)`);
+    console.log(`[telegram] caption: ${caption}`);
+    return;
+  }
+
+  await withRetry(
+    async () => {
+      const form = new FormData();
+      form.append('chat_id', chatId);
+      form.append('caption', caption);
+      form.append('document', new Blob([buffer], { type: 'application/pdf' }), filename);
+
+      const res = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
+        method: 'POST',
+        body: form,
+      });
+      if (!res.ok) {
+        throw new Error(`Telegram sendDocument failed: ${res.status} ${await res.text()}`);
+      }
+    },
+    { attempts: 3, delayMs: 1500, label: 'telegram send document' }
+  );
+  console.log('[telegram] PDF sent');
 }
 
 async function sendAlert(text) {
@@ -45,4 +107,4 @@ async function sendAlert(text) {
   await sendMessage(`⚠️ ${text}`, { chatId: adminChatId });
 }
 
-module.exports = { sendMessage, sendAlert };
+module.exports = { sendMessage, sendDocument, sendAlert };

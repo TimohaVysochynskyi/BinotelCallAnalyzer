@@ -54,13 +54,13 @@ async function saveCall(call) {
   await pool.query('DELETE FROM pending_calls WHERE general_call_id = $1', [call.generalCallId]);
 }
 
-async function getTranscriptsSince(sinceDate) {
+async function getTranscriptsInRange(start, end) {
   const { rows } = await pool.query(
     `SELECT manager_name AS "managerName", transcript, start_time AS "startTime"
      FROM calls
-     WHERE start_time >= $1 AND transcript IS NOT NULL AND transcript <> ''
+     WHERE start_time >= $1 AND start_time < $2 AND transcript IS NOT NULL AND transcript <> ''
      ORDER BY manager_name, start_time`,
-    [sinceDate]
+    [start, end]
   );
   return rows;
 }
@@ -92,27 +92,46 @@ async function getPendingCalls() {
   return rows;
 }
 
+async function getState(key) {
+  const { rows } = await pool.query('SELECT value FROM app_state WHERE key = $1', [key]);
+  return rows[0]?.value ?? null;
+}
+
+async function setState(key, value) {
+  await pool.query(
+    `INSERT INTO app_state (key, value) VALUES ($1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = $2`,
+    [key, value]
+  );
+}
+
 async function getCheckpoint() {
-  const { rows } = await pool.query(`SELECT value FROM app_state WHERE key = 'last_polled_until'`);
-  return rows[0]?.value ? new Date(rows[0].value) : null;
+  const value = await getState('last_polled_until');
+  return value ? new Date(value) : null;
 }
 
 async function setCheckpoint(date) {
-  await pool.query(
-    `INSERT INTO app_state (key, value) VALUES ('last_polled_until', $1)
-     ON CONFLICT (key) DO UPDATE SET value = $1`,
-    [date.toISOString()]
-  );
+  await setState('last_polled_until', date.toISOString());
+}
+
+async function getLastReportDate() {
+  return getState('last_report_date');
+}
+
+async function setLastReportDate(dateStr) {
+  await setState('last_report_date', dateStr);
 }
 
 module.exports = {
   migrate,
   callExists,
   saveCall,
-  getTranscriptsSince,
+  getTranscriptsInRange,
   upsertPending,
   markPendingFailed,
   getPendingCalls,
   getCheckpoint,
   setCheckpoint,
+  getLastReportDate,
+  setLastReportDate,
 };

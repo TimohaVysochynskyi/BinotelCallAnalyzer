@@ -11,8 +11,11 @@ async function main() {
   await migrate();
 
   if (jobType === 'poll') {
+    // the one deployed job: polls for new calls AND, once a day at REPORT_HOUR (Kyiv time),
+    // sends the daily report - see maybeSendDailyReport() in pollNewCalls.js
     await pollNewCalls();
   } else if (jobType === 'report') {
+    // local-only manual override for testing - never deployed, run via `npm run report`
     await generateDailyReport();
   } else {
     throw new Error(`Unknown JOB_TYPE "${jobType}" - expected "poll" or "report"`);

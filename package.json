@@ -14,7 +14,9 @@
     "backfill": "node src/backfill.js"
   },
   "dependencies": {
+    "dejavu-fonts-ttf": "^2.37.3",
     "dotenv": "^17.4.2",
+    "pdfkit": "^0.19.1",
     "pg": "^8.21.0"
   },
   "devDependencies": {
