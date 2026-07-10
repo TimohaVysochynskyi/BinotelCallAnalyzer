@@ -1,4 +1,4 @@
-const { withRetry } = require('./retry');
+import { withRetry } from './retry.js';
 
 const TELEGRAM_MAX_LENGTH = 4096;
 const CHUNK_TARGET_LENGTH = 3800; // margin below the hard limit for safety
@@ -72,39 +72,9 @@ async function sendMessage(text, { chatId } = {}) {
   }
 }
 
-async function sendDocument(buffer, filename, caption) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
-
-  if (!token || !chatId) {
-    console.log(`[telegram] DRY RUN - would send document "${filename}" (${buffer.length} bytes)`);
-    console.log(`[telegram] caption: ${caption}`);
-    return;
-  }
-
-  await withRetry(
-    async () => {
-      const form = new FormData();
-      form.append('chat_id', chatId);
-      form.append('caption', caption);
-      form.append('document', new Blob([buffer], { type: 'application/pdf' }), filename);
-
-      const res = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
-        method: 'POST',
-        body: form,
-      });
-      if (!res.ok) {
-        throw new Error(`Telegram sendDocument failed: ${res.status} ${await res.text()}`);
-      }
-    },
-    { attempts: 3, delayMs: 1500, label: 'telegram send document' }
-  );
-  console.log('[telegram] PDF sent');
-}
-
 async function sendAlert(text) {
   const adminChatId = process.env.TELEGRAM_ADMIN_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
   await sendMessage(`⚠️ ${text}`, { chatId: adminChatId });
 }
 
-module.exports = { sendMessage, sendDocument, sendAlert };
+export { sendMessage, sendAlert };

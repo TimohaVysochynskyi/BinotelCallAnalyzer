@@ -1,4 +1,4 @@
-const { withRetry } = require('./retry');
+import { withRetry } from './retry.js';
 
 const WEAKEST_STAGES = ['виявлення потреби', 'робота із запереченнями', 'допродаж', 'закриття'];
 
@@ -53,4 +53,4 @@ async function classifyCall(transcript) {
   );
 }
 
-module.exports = { classifyCall };
+export { classifyCall };

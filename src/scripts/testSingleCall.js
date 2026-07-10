@@ -1,15 +1,15 @@
-require('dotenv').config();
-const { getCallRecordUrl } = require('./binotel');
-const { transcribeAudio } = require('./transcribe');
+import 'dotenv/config';
+import { getCallRecordUrl } from '../core/binotel.js';
+import { transcribeAudio } from '../core/transcribe.js';
 
 // Manual smoke test for a single known generalCallID (grab one from the Binotel web dashboard
-// call log). Skips the DB and the not-yet-confirmed "list calls for period" endpoint entirely -
-// only exercises the two pieces the client already gave us: call-record.json + OpenAI transcription.
-// Usage: node src/testSingleCall.js <generalCallId>
+// call log). Skips the DB entirely - only exercises Binotel call-record.json + OpenAI
+// transcription.
+// Usage: node src/scripts/testSingleCall.js <generalCallId>
 async function main() {
   const generalCallId = process.argv[2];
   if (!generalCallId) {
-    throw new Error('Usage: node src/testSingleCall.js <generalCallId>');
+    throw new Error('Usage: node src/scripts/testSingleCall.js <generalCallId>');
   }
 
   console.log('Fetching record URL...');

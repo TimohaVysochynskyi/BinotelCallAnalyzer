@@ -1,15 +1,15 @@
-require('dotenv').config();
-const { migrate } = require('./store');
-const { processCallsForRange } = require('./processCalls');
+import 'dotenv/config';
+import { migrate } from '../core/store.js';
+import { processCallsForRange } from '../jobs/processCalls.js';
 
 // Process every call in an explicit date/time range (auto-split into <=23h chunks
 // per Binotel's 24h cap on list-of-calls-for-period). Dates are parsed in the local
 // timezone of this machine unless you include an explicit offset/Z.
-// Usage: node src/backfill.js "2026-07-01 00:00:00" "2026-07-03 23:59:59"
+// Usage: node src/scripts/backfill.js "2026-07-01 00:00:00" "2026-07-03 23:59:59"
 async function main() {
   const [startArg, endArg] = process.argv.slice(2);
   if (!startArg || !endArg) {
-    throw new Error('Usage: node src/backfill.js "<start date/time>" "<end date/time>"');
+    throw new Error('Usage: node src/scripts/backfill.js "<start date/time>" "<end date/time>"');
   }
 
   const start = new Date(startArg);

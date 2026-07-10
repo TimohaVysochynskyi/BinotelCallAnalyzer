@@ -1,4 +1,4 @@
-async function withRetry(fn, { attempts = 3, delayMs = 1000, label = 'operation' } = {}) {
+export async function withRetry(fn, { attempts = 3, delayMs = 1000, label = 'operation' } = {}) {
   let lastErr;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
@@ -13,5 +13,3 @@ async function withRetry(fn, { attempts = 3, delayMs = 1000, label = 'operation'
   }
   throw lastErr;
 }
-
-module.exports = { withRetry };

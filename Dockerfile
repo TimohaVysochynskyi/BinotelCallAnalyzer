@@ -7,4 +7,4 @@ RUN npm install --omit=dev
 
 COPY src ./src
 
-CMD ["node", "src/index.js"]
+CMD ["node", "src/jobs/index.js"]

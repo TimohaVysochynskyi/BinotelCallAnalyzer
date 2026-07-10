@@ -1,4 +1,4 @@
-const { withRetry } = require('./retry');
+import { withRetry } from './retry.js';
 
 const BASE_URL = process.env.BINOTEL_BASE_URL || 'https://api.binotel.com/api/4.0';
 
@@ -65,4 +65,4 @@ async function getCallRecordUrl(generalCallId) {
   return data.url || data.response?.record || data.record;
 }
 
-module.exports = { listCallsForPeriod, getCallRecordUrl };
+export { listCallsForPeriod, getCallRecordUrl };

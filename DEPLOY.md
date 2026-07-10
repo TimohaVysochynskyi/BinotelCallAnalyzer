@@ -9,38 +9,52 @@
 - [x] `DATABASE_URL` (Neon), `BINOTEL_API_KEY/SECRET`, `OPENAI_API_KEY`, `TELEGRAM_BOT_TOKEN` — всі є
 - [x] `binotel-poller` створено й задеплоєно
 
-## Один Render Cron Job сервіс
+## Два сервіси з одного репо/образу
 
-| Сервіс | Schedule | `JOB_TYPE` | Що робить |
+| Сервіс | Тип | Команда / Schedule | Що робить |
 |---|---|---|---|
-| `binotel-poller` | `*/15 * * * *` | `poll` | Кожні 15 хв: тягне нові дзвінки з Binotel, транскрибує, зберігає. Додатково — в кожну годину зі списку `REPORT_HOURS` (за замовчуванням `12,19`) — сам генерує й надсилає в Telegram звіт за період з моменту попереднього звіту |
+| `binotel-poller` | Cron Job | `*/15 * * * *`, `JOB_TYPE=poll` (CMD за замовч. `node src/jobs/index.js`) | Кожні 15 хв: тягне нові дзвінки з Binotel, транскрибує, класифікує, визначає менеджера, зберігає в Postgres |
+| `binotel-bot` | Background Worker | Docker Command → `node src/bot/index.js` | Постійно онлайн: інтерактивний бот звітності + авто-звіти о 13:00/19:30 (Kyiv) |
 
-Більше сервісів на Render не потрібно — і polling, і звіти живуть в одному job'і, розрізняючись лише внутрішньою логікою за часом доби (`src/pollNewCalls.js` → `maybeSendScheduledReport()`).
-
-Region — **Frankfurt (EU Central)** (той самий регіон, що й Neon). Instance Type — **Starter**.
+Обидва — з того самого `Dockerfile` (образ спільний, бот лише перевизначає стартову команду). Regione обох — **Frankfurt (EU Central)** (як Neon). Cron Job — **Starter**; Background Worker — найдешевший постійний план (~$7/міс, бо процес живе 24/7).
 
 ## Env-змінні
 
+`binotel-poller` (Cron Job):
 ```
 BINOTEL_API_KEY, BINOTEL_API_SECRET, BINOTEL_BASE_URL,
 OPENAI_API_KEY, OPENAI_TRANSCRIBE_MODEL, OPENAI_ANALYZE_MODEL, CALL_LANGUAGE,
 TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_ADMIN_CHAT_ID,
-DATABASE_URL, POLL_WINDOW_MINUTES, MAX_PENDING_ATTEMPTS, REPORT_HOURS,
-GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SHEET_ID,
+DATABASE_URL, POLL_WINDOW_MINUTES, SHARED_EXTENSIONS, MAX_PENDING_ATTEMPTS,
 JOB_TYPE=poll
 ```
 
-## Ручний форс-тест звіту (локально, без Render)
+`binotel-bot` (Background Worker):
+```
+TELEGRAM_BOT_TOKEN        (той самий єдиний бот @OBVCarServiceWork_bot, що й у поллера)
+TELEGRAM_CHAT_ID          (owner chat: дефолт для allowlist і отримувача звітів)
+BOT_ALLOWED_CHAT_IDS      (comma-separated user IDs, owner-only; дефолт — TELEGRAM_CHAT_ID)
+BOT_REPORT_CHAT_ID        (куди слати авто-звіти; дефолт — TELEGRAM_CHAT_ID)
+BOT_REPORT_TIMES=13:00,19:30
+DATABASE_URL, OPENAI_API_KEY, OPENAI_ANALYZE_MODEL,
+BINOTEL_API_KEY, BINOTEL_API_SECRET, BINOTEL_BASE_URL   (для "прослухати запис")
+```
+
+Обидва сервіси використовують **один** `TELEGRAM_BOT_TOKEN` (новий чистий бот). Поллер шле ним лише вихідні алерти, бот — інтерактив + звіти; конфлікту немає.
+
+## Перший запуск таблиці менеджерів
+
+Один раз (локально або будь-де з доступом до `DATABASE_URL`):
 
 ```
-npm run report
+npm run seed:managers
 ```
 
-Ганяє звіт за попередню добу відразу, незалежно від часу й від того, чи вже надсилався черговий автоматичний звіт (це окрема, незалежна від `poll` дія — не займає позначку слоту `last_report_slot`, тож не заважає наступному автоматичному запуску).
+Заповнює `managers` трьома відомими менеджерами (Роман/903, Андрій/904, Володимир/905). Idempotent — можна перезапускати, ручні правки не затирає.
 
 ## Перевірка на Render
 
-Вкладка **Logs** сервіса `binotel-poller` — той самий вивід, що й локально (`[poll]`, `[binotel]`, `[processCalls]`). У кожну з годин `REPORT_HOURS` там же з'являться рядки `[poll] Kyiv hour is ... report slot ... generating report` і `[report] ...` — це і є автоматичний звіт за період з моменту попереднього.
+Вкладка **Logs** сервіса `binotel-poller` — той самий вивід, що й локально (`[poll]`, `[binotel]`, `[processCalls]`). Кожен запуск: ретрай pending → поллінг нових дзвінків від чекпоінта → транскрипція/класифікація/атрибуція/збереження.
 
 ## Оновлення коду
 
