@@ -1,10 +1,16 @@
 import 'dotenv/config';
 import { Bot, session } from 'grammy';
-import { migrate, addOperatorNote } from '../core/store.js';
+import { migrate, migrateKb, addOperatorNote } from '../core/store.js';
 import { mainMenu, quickKeyboard, QUICK } from './keyboards.js';
 import { registerStats, statsPicker } from './stats.js';
 import { registerArchive, archivePicker } from './archive.js';
+import { registerKnowledgeBase, answerQuestion, promptQuestion } from './kb.js';
 import { sendManualReport, startScheduler } from './report.js';
+import { sendLong } from './ui.js';
+
+// Knowledge base needs pgvector; migrateKb() at startup flips this on. Handlers degrade
+// gracefully when it's false.
+const kbState = { ready: false };
 
 // One Telegram bot serves everything: the interactive report bot here AND the ingest's
 // outbound alerts (core/telegram.js) - same token. sendMessage (alerts) does not conflict with
@@ -64,10 +70,15 @@ async function openArchive(ctx) {
   await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: kb });
 }
 
+async function openAsk(ctx) {
+  await promptQuestion(ctx, kbState);
+}
+
 // --- Commands (native "Menu" button next to the input lists these) -------------------------
 bot.command(['start', 'menu'], openMenu);
 bot.command('stats', openStats);
 bot.command('archive', openArchive);
+bot.command('ask', openAsk);
 bot.command('report', async (ctx) => {
   await sendManualReport(ctx.api, ctx.chat.id);
 });
@@ -79,11 +90,6 @@ bot.callbackQuery('menu', async (ctx) => {
   await ctx.answerCallbackQuery();
 });
 
-bot.callbackQuery('ask', async (ctx) => {
-  await ctx.answerCallbackQuery();
-  await ctx.reply('❓ База знань (електронний посібник) ще не підключена — з\'явиться згодом.');
-});
-
 bot.callbackQuery('report:now', async (ctx) => {
   await ctx.answerCallbackQuery({ text: 'Генерую звіт…' });
   await sendManualReport(ctx.api, ctx.chat.id);
@@ -92,6 +98,7 @@ bot.callbackQuery('report:now', async (ctx) => {
 // --- Feature modules -----------------------------------------------------------------------
 registerStats(bot);
 registerArchive(bot);
+registerKnowledgeBase(bot, kbState);
 
 // --- Free-text input: quick-keyboard buttons first, then the "add note" step ---------------
 bot.on('message:text', async (ctx) => {
@@ -101,6 +108,7 @@ bot.on('message:text', async (ctx) => {
   if (text === QUICK.menu) return openMenu(ctx);
   if (text === QUICK.stats) return openStats(ctx);
   if (text === QUICK.archive) return openArchive(ctx);
+  if (text === QUICK.ask) return openAsk(ctx);
   if (text === QUICK.report) {
     ctx.session.awaiting = null;
     await sendManualReport(ctx.api, ctx.chat.id);
@@ -116,6 +124,20 @@ bot.on('message:text', async (ctx) => {
     return;
   }
 
+  if (st?.type === 'kb_question') {
+    ctx.session.awaiting = null;
+    await ctx.replyWithChatAction('typing').catch(() => {});
+    try {
+      const answer = await answerQuestion(ctx.message.text);
+      await sendLong(ctx.api, ctx.chat.id, answer);
+    } catch (err) {
+      console.error(`[bot] KB answer failed: ${err.message}`);
+      await ctx.reply(`❌ Не вдалося відповісти: ${err.message}`);
+    }
+    await ctx.reply('Ще питання? Напишіть його, або скористайтесь меню.', { reply_markup: quickKeyboard() });
+    return;
+  }
+
   await ctx.reply('Скористайтеся меню нижче або кнопкою «☰ Меню».', { reply_markup: quickKeyboard() });
 });
 
@@ -126,11 +148,21 @@ bot.catch((err) => {
 async function main() {
   await migrate();
 
+  // Knowledge base is optional - if pgvector isn't available, the rest of the bot still runs.
+  try {
+    await migrateKb();
+    kbState.ready = true;
+    console.log('[bot] knowledge base ready (pgvector)');
+  } catch (err) {
+    console.error(`[bot] knowledge base DISABLED: ${err.message}`);
+  }
+
   // Native "Menu" button next to the input → lists these commands.
   await bot.api.setMyCommands([
     { command: 'menu', description: '☰ Головне меню' },
     { command: 'stats', description: '📊 Статистика менеджера' },
     { command: 'archive', description: '🗂 Архів розмов' },
+    { command: 'ask', description: '❓ Поставити питання (база знань)' },
     { command: 'report', description: '🔄 Звіт зараз' },
   ]).catch((e) => console.error(`[bot] setMyCommands failed: ${e.message}`));
   await bot.api.setChatMenuButton({ menu_button: { type: 'commands' } }).catch((e) => console.error(`[bot] setChatMenuButton failed: ${e.message}`));

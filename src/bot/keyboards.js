@@ -6,6 +6,7 @@ import { InlineKeyboard, Keyboard } from 'grammy';
 const QUICK = {
   stats: '📊 Статистика',
   archive: '🗂 Архів',
+  ask: '❓ Питання',
   report: '🔄 Звіт зараз',
   menu: '☰ Меню',
 };
@@ -15,7 +16,9 @@ function quickKeyboard() {
     .text(QUICK.stats)
     .text(QUICK.archive)
     .row()
+    .text(QUICK.ask)
     .text(QUICK.report)
+    .row()
     .text(QUICK.menu)
     .resized()
     .persistent();
@@ -34,7 +37,8 @@ function mainMenu() {
     .row()
     .text('🗂 Архів розмов', 'arch:pick')
     .row()
-    .text('❓ Поставити питання', 'ask')
+    .text('❓ Поставити питання', 'kb:ask')
+    .text('📚 Файли', 'kb:menu')
     .row()
     .text('🔄 Звіт зараз', 'report:now');
 }

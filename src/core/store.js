@@ -212,6 +212,97 @@ async function listOperatorNotes(operatorName, limit = 10) {
   return rows;
 }
 
+// ---- Knowledge base (RAG over uploaded manuals, pgvector) ---------------------------------
+
+// Separate from migrate() so a missing pgvector extension disables only the KB, not the whole
+// bot. Called (guarded) at bot startup.
+async function migrateKb() {
+  await pool.query('CREATE EXTENSION IF NOT EXISTS vector');
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS kb_docs (
+      id SERIAL PRIMARY KEY,
+      filename TEXT NOT NULL,
+      uploaded_by TEXT,
+      file_id TEXT,
+      mime TEXT,
+      chunk_count INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    -- Telegram file_id lets us resend the original document ("open file") without storing bytes.
+    ALTER TABLE kb_docs ADD COLUMN IF NOT EXISTS file_id TEXT;
+    ALTER TABLE kb_docs ADD COLUMN IF NOT EXISTS mime TEXT;
+
+    CREATE TABLE IF NOT EXISTS kb_chunks (
+      id SERIAL PRIMARY KEY,
+      doc_id INTEGER NOT NULL REFERENCES kb_docs(id) ON DELETE CASCADE,
+      ord INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      embedding vector(1536),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS kb_chunks_embedding_idx ON kb_chunks USING hnsw (embedding vector_cosine_ops);
+  `);
+}
+
+const vecToStr = (arr) => `[${arr.join(',')}]`;
+
+async function insertKbDoc(filename, uploadedBy, fileId, mime) {
+  const { rows } = await pool.query(
+    'INSERT INTO kb_docs (filename, uploaded_by, file_id, mime) VALUES ($1, $2, $3, $4) RETURNING id',
+    [filename, uploadedBy || null, fileId || null, mime || null]
+  );
+  return rows[0].id;
+}
+
+// chunks: [{ ord, content, embedding: number[] }]
+async function insertKbChunks(docId, chunks) {
+  for (const c of chunks) {
+    await pool.query(
+      'INSERT INTO kb_chunks (doc_id, ord, content, embedding) VALUES ($1, $2, $3, $4::vector)',
+      [docId, c.ord, c.content, vecToStr(c.embedding)]
+    );
+  }
+  await pool.query('UPDATE kb_docs SET chunk_count = $2 WHERE id = $1', [docId, chunks.length]);
+}
+
+async function searchKbChunks(queryEmbedding, k = 6) {
+  const { rows } = await pool.query(
+    `SELECT c.content, d.filename, d.id AS "docId", (c.embedding <=> $1::vector) AS dist
+     FROM kb_chunks c JOIN kb_docs d ON d.id = c.doc_id
+     ORDER BY c.embedding <=> $1::vector
+     LIMIT $2`,
+    [vecToStr(queryEmbedding), k]
+  );
+  return rows;
+}
+
+async function listKbDocs() {
+  const { rows } = await pool.query(
+    `SELECT id, filename, chunk_count AS "chunkCount", created_at AS "createdAt"
+     FROM kb_docs ORDER BY created_at DESC`
+  );
+  return rows;
+}
+
+async function countKbChunks() {
+  const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM kb_chunks');
+  return rows[0].n;
+}
+
+async function getKbDoc(id) {
+  const { rows } = await pool.query(
+    `SELECT id, filename, file_id AS "fileId", mime, chunk_count AS "chunkCount", created_at AS "createdAt"
+     FROM kb_docs WHERE id = $1`,
+    [id]
+  );
+  return rows[0] || null;
+}
+
+async function deleteKbDoc(id) {
+  await pool.query('DELETE FROM kb_docs WHERE id = $1', [id]);
+}
+
 // ---- Pending queue (ingest) ---------------------------------------------------------------
 
 async function upsertPending(call, errorMessage) {
@@ -297,6 +388,14 @@ export {
   updateManagerName,
   addOperatorNote,
   listOperatorNotes,
+  migrateKb,
+  insertKbDoc,
+  insertKbChunks,
+  searchKbChunks,
+  listKbDocs,
+  countKbChunks,
+  getKbDoc,
+  deleteKbDoc,
   upsertPending,
   markPendingFailed,
   getPendingCalls,

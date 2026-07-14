@@ -47,7 +47,7 @@ src/
   jobs/     — задеплоєний cron-джоб (інжест): index.js (entrypoint) + pollNewCalls + processCalls
   scripts/  — одноразові інструменти: backfill, testSingleCall, reattributeShared
   bot/      — Telegram-бот звітності (grammy, окремий токен, окремий сервіс):
-              index.js (entrypoint) + keyboards + stats + archive + report + analyze + time + ui
+              index.js (entrypoint) + keyboards + stats + archive + report + analyze + kb + time + ui
               (див. src/bot/README.md)
 ```
 
@@ -76,9 +76,9 @@ src/
 1. **Авто-звіти** (`report.js`) — власний планувальник (`setInterval` 30с звіряє київський час зі слотами `BOT_REPORT_TIMES`, дефолт `13:00,19:30`). Період — з моменту попереднього авто-звіту (`app_state.last_report_slot`/`last_report_until`, дедуп слоту переживає рестарт; in-memory lock від подвійного спрацювання за хвилину). Групує дзвінки по менеджеру → OpenAI-резюме (`analyze.js`, промпт-заглушка) → одне текстове повідомлення (chunk >4096). Кнопка "Звіт зараз" — ручний за сьогодні, стан розкладу не чіпає.
 2. **Статистика менеджера** (`stats.js`) — менеджер → період (день / тиждень з пн / місяць / квартал, київські, `bot/time.js`) → к-сть/успішність/бал/слабкий етап + нотатки (`manager_notes`).
 3. **Архів розмов** (`archive.js`) — менеджер → період → список (пагінація) → дзвінок: транскрипт + "🎧 Прослухати" (свіжий `getCallRecordUrl` з Binotel → `sendAudio`).
-4. **База знань** ("Поставити питання") — **каркас-заглушка**, чекає файл посібника від клієнта.
+4. **База знань / «Поставити питання»** (`kb.js`) — **RAG** по завантажених посібниках. Власник надсилає боту документ (PDF `unpdf` / DOCX `mammoth` / TXT) → витяг тексту → нарізка (`chunkText`, ~2400 симв. з перекриттям) → embeddings (`text-embedding-3-small`) → зберігання в Postgres (`kb_docs` + `kb_chunks` з `vector(1536)`, **pgvector**). Питання: embedding → cosine-пошук топ-6 шматків (`<=>`) → gpt-4o-mini відповідає **лише** з тих фрагментів (інакше «немає відповіді»), з посиланням на файл. Екран «📚 Файли»: кнопка на кожен файл → деталі (📄 Відкрити оригінал через збережений Telegram `file_id` / 🗑 Видалити з підтвердженням, каскад) + «➕ Завантажити новий». `migrateKb()` guard'иться: нема pgvector → KB вимкнено, решта бота живе. **Усі KB-екрани — простий текст без Markdown** (назви файлів часто містять `_`, що ламало парсинг Markdown — був баг «нічого не відбувається»).
 
-Бот НЕ пише в `calls`/`pending_calls` — лише читає; пише тільки в `manager_notes` і звітні ключі `app_state`.
+Бот НЕ пише в `calls`/`pending_calls` — лише читає; пише в `manager_notes`, `kb_docs`/`kb_chunks` і звітні ключі `app_state`.
 
 ### Ідентифікація оператора (`resolveManagerName` в `processCalls.js`)
 
@@ -103,6 +103,7 @@ src/
 - **`calls`** — `general_call_id` (унікальний), `internal_number`, `manager_name` (ім'я оператора — ключ групування скрізь), `call_type`, `start_time`, `duration_sec`, `transcript`, `is_success`, `weakest_stage`, `communication_score`. (Таблиці `managers` й колонки `manager_id` більше немає — Binotel є джерелом операторів.)
 - **`pending_calls`** — підмножина полів calls + `attempts`, `status` (`pending`/`failed`), `last_error`
 - **`manager_notes`** — `id`, `operator_name` (ім'я оператора = `calls.manager_name`), `author`, `note`, `created_at`. Нотатки, які лишає власник у боті (фіча 2)
+- **`kb_docs`** / **`kb_chunks`** — база знань (фіча 4): `kb_docs` (файл + `file_id`/`mime` для повторної відправки оригіналу + `chunk_count`), `kb_chunks` (`doc_id` FK ON DELETE CASCADE, `ord`, `content`, `embedding vector(1536)`, hnsw-індекс cosine). Створюються окремо в `migrateKb()` (потребує `CREATE EXTENSION vector`), не в `migrate()`
 - **`app_state`** — key-value: `last_polled_until` (чекпоінт інжесту); `last_report_slot`/`last_report_until` (розклад авто-звітів, пише **бот**)
 
 Час: інжест рахує все в UTC (чекпоінт — абсолютний момент), йому Kyiv не треба. **Боту** Kyiv потрібен (слоти звітів + межі періодів) — `src/bot/time.js` рахує через `Intl.DateTimeFormat`, без хардкод-офсету (ламається на EET/EEST). У `core/` спільного `time.js` немає — це суто ботова логіка.
@@ -111,7 +112,7 @@ src/
 
 Повний список і коментарі — `.env.example`. Ключове:
 - `BINOTEL_API_KEY/SECRET`, `BINOTEL_BASE_URL` — ендпоінти підтверджені емпірично на реальному акаунті 2026-07-06 (`stats/list-of-calls-for-period.json` з `startTime`/`stopTime` в unix-секундах, `stats/call-record.json`)
-- `OPENAI_ANALYZE_MODEL` — використовується і для `classifyCall`, і для `identifyManager` (дефолт `gpt-4o-mini`)
+- `OPENAI_ANALYZE_MODEL` — `classifyCall`, `identifyManager`, звіти й відповіді бази знань (дефолт `gpt-4o-mini`). `OPENAI_EMBED_MODEL` — embeddings бази знань (дефолт `text-embedding-3-small`, 1536-dim)
 - `SHARED_EXTENSIONS` — comma-separated внутрішні номери спільних слухавок (дефолт `901,902`), для яких менеджер визначається з транскрипту
 - `DATABASE_URL` — Neon Postgres
 - `TELEGRAM_BOT_TOKEN` — **єдиний бот на все**: `@OBVCarServiceWork_bot` (id 8683695884, новий, чистий, без webhook — перевірено `getWebhookInfo` 2026-07-10). Обслуговує і бота звітності (`getUpdates`), і вихідні алерти інжесту (`sendMessage`) — це не конфліктує. `@obvcarservicebot` (id 8979148940) більше **НЕ** використовується (його webhook належить CarBook — `api.carbook.pro/api/telegram/webhook/7971`)
@@ -128,7 +129,8 @@ src/
 - **Звітність (PDF/Sheets) в інжесті** — ✅ видалено (`generateReport.js`, `pdfReport.js`, `analyze.js`, `sendDocument`, розклад `REPORT_HOURS`). Логіка звітів переїхала в бот (текстом, без PDF/Sheets)
 - **Джерело операторів = Binotel** — ✅ таблицю `managers` прибрано (клієнт керує операторами в Binotel). Стата/архів/звіти групуються по `manager_name` (ім'я від Binotel). Особисті 903/904/905 → ім'я з `employeeData.name`; спільні 901/902 → AI обирає з динамічного roster'а (імена, що Binotel уже давав). Це полагодило порожні стату/архів (раніше групувалось по `manager_id`, який був `NULL` у 100% дзвінків)
 - **Ідентифікація 901/902** — ✅ обов'язкова, лишилась: `identifyManager.js` (enum-вибір з roster). Якість залежить від того, чи оператори представляються (клієнт це організує)
-- **Telegram-бот звітності** — ✅ реалізовано (`src/bot/`, grammy, єдиний бот `@OBVCarServiceWork_bot` через `TELEGRAM_BOT_TOKEN`): авто-звіти 13:00/19:30, статистика менеджера (день/тиждень/місяць/квартал) + нотатки, архів розмов з прослуховуванням аудіо. **База знань ("Поставити питання") — лише каркас**, чекає файл електронного посібника від клієнта (тоді embeddings або весь текст у контекст). Хостинг — Render Background Worker (клієнт погодив ~$7/міс)
+- **Telegram-бот звітності** — ✅ реалізовано (`src/bot/`, grammy, єдиний бот `@OBVCarServiceWork_bot` через `TELEGRAM_BOT_TOKEN`): авто-звіти 13:00/19:30, статистика менеджера (день/тиждень/місяць/квартал) + нотатки, архів розмов з прослуховуванням аудіо. Хостинг — Render Background Worker (клієнт погодив ~$7/міс)
+- **База знань (RAG)** — ✅ реалізовано (`bot/kb.js` + pgvector): завантаження PDF/DOCX/TXT боту, embeddings у Postgres, «Поставити питання» → відповідь лише з посібників. Протестовано наскрізь 2026-07-10 (Neon має pgvector 0.8.1). Скановані PDF/зображення без текстового шару → потрібен OCR (не реалізовано). Клієнт дасть реальні файли — перевірити витяг тексту з його PDF
 - **Мова транскрибації** — ✅ детекція spoken-vs-written + переписування (суржик = uk); фікс «українську записує як російську» (`core/transcribe.js`)
 - **UX бота** — ✅ постійна reply-клавіатура (📊/🗂/🔄/☰) + нативні команди `/menu /stats /archive /report` + inline «« Меню» скрізь, щоб не губити меню під час навігації
 - **Промпт звіту** — у `bot/analyze.js` заглушка (стисле резюме на менеджера); клієнт обіцяв дати свій — замінити текст `SYSTEM_PROMPT`

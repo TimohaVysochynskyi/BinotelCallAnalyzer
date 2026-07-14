@@ -36,9 +36,11 @@ TELEGRAM_CHAT_ID          (owner chat: дефолт для allowlist і отри
 BOT_ALLOWED_CHAT_IDS      (comma-separated user IDs, owner-only; дефолт — TELEGRAM_CHAT_ID)
 BOT_REPORT_CHAT_ID        (куди слати авто-звіти; дефолт — TELEGRAM_CHAT_ID)
 BOT_REPORT_TIMES=13:00,19:30
-DATABASE_URL, OPENAI_API_KEY, OPENAI_ANALYZE_MODEL,
+DATABASE_URL, OPENAI_API_KEY, OPENAI_ANALYZE_MODEL, OPENAI_EMBED_MODEL,
 BINOTEL_API_KEY, BINOTEL_API_SECRET, BINOTEL_BASE_URL   (для "прослухати запис")
 ```
+
+База знань бота потребує розширення **pgvector** — `migrateKb()` створює його автоматично (`CREATE EXTENSION IF NOT EXISTS vector`); Neon підтримує (перевірено, v0.8.1). Якщо його раптом нема — база знань просто вимкнеться, решта бота працює.
 
 Обидва сервіси використовують **один** `TELEGRAM_BOT_TOKEN` (новий чистий бот). Поллер шле ним лише вихідні алерти, бот — інтерактив + звіти; конфлікту немає.
 
