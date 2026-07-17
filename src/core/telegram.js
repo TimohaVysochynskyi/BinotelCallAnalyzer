@@ -73,8 +73,9 @@ async function sendMessage(text, { chatId } = {}) {
 }
 
 async function sendAlert(text) {
-  const adminChatId = process.env.TELEGRAM_ADMIN_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
-  await sendMessage(`⚠️ ${text}`, { chatId: adminChatId });
+  // Alerts go to TELEGRAM_CHAT_ID (the same default sendMessage uses). A separate alert chat used
+  // to be configurable via TELEGRAM_ADMIN_CHAT_ID, but it was never used and was removed.
+  await sendMessage(`⚠️ ${text}`);
 }
 
 export { sendMessage, sendAlert };

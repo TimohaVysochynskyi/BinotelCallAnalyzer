@@ -2,9 +2,9 @@
 
 Хостинг — власний VPS на **AlmaLinux 10**. Два процеси з одного репо тримає **pm2**:
 
-| Процес | Команда | Режим |
-|---|---|---|
-| `obv-bot` | `node src/bot/index.js` | Постійно онлайн 24/7 (long-polling) — бот звітності + авто-звіти 13:00/19:30 (Kyiv) |
+| Процес       | Команда                                    | Режим                                                                                                                     |
+| ------------ | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `obv-bot`    | `node src/bot/index.js`                    | Постійно онлайн 24/7 (long-polling) — бот звітності + авто-звіти 13:00/19:30 (Kyiv)                                       |
 | `obv-poller` | `node src/jobs/index.js` (`JOB_TYPE=poll`) | Разова задача кожні 15 хв: тягне нові дзвінки з Binotel → транскрибує → класифікує → визначає менеджера → пише в Postgres |
 
 Обидва читають один `.env` з кореня проєкту (кожен entrypoint робить `import 'dotenv/config'`). Розклад поллера й тримання бота живим — усе через pm2 (`ecosystem.config.cjs` у репо), окремий system-cron чи Docker не потрібні.
@@ -55,10 +55,9 @@ POLL_WINDOW_MINUTES=20
 SHARED_EXTENSIONS=901,902
 MAX_PENDING_ATTEMPTS=20
 TELEGRAM_BOT_TOKEN=...
-TELEGRAM_CHAT_ID=...
-TELEGRAM_ADMIN_CHAT_ID=
-BOT_ALLOWED_CHAT_IDS=...
-BOT_REPORT_CHAT_ID=...
+TELEGRAM_CHAT_ID=...            # alerts (a group) + report fallback
+BOT_ALLOWED_CHAT_IDS=...        # bootstrap: user ids seeded as directors
+BOT_REPORT_CHAT_ID=...          # where auto-reports are sent
 BOT_REPORT_TIMES=13:00,19:30
 OPERATOR_ALIASES=
 ```

@@ -47,7 +47,7 @@ src/
 
 ## Сповіщення про збої
 
-`sendAlert()` (`src/core/telegram.js`) шле в `TELEGRAM_ADMIN_CHAT_ID` (fallback — `TELEGRAM_CHAT_ID`) у випадках:
+`sendAlert()` (`src/core/telegram.js`) шле в `TELEGRAM_CHAT_ID` у випадках:
 - джоба впала з необробленою помилкою
 - дзвінок у `pending_calls` вичерпав ліміт спроб
 
