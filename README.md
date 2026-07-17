@@ -1,4 +1,4 @@
-# Binotel Call Analyzer
+# OBV Car Service Bot
 
 Інжест-пайплайн дзвінків автосервісу. Один Render Cron Job (`JOB_TYPE=poll`), що запускається кожні ~15 хв:
 
