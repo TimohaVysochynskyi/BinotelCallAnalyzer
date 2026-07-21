@@ -33,4 +33,17 @@ function hasAlias(name) {
   return name != null && Object.prototype.hasOwnProperty.call(OPERATOR_ALIASES, name);
 }
 
-export { displayName, hasAlias, OPERATOR_ALIASES };
+// Format a Ukrainian phone for display as +380XXXXXXXXX. Handles the shapes we see: 12-digit with
+// country code (380…), 10-digit with a leading 0 (0…), and 9-digit without the 0 (Binotel sometimes
+// drops it). Short internal extensions (901/902, ≤4 digits) and anything of an unexpected length are
+// returned unchanged — never turn an extension into "+380901". Display-only; the DB keeps raw values.
+function formatPhone(raw) {
+  const d = String(raw ?? '').replace(/\D/g, '');
+  if (d.length <= 4) return String(raw ?? '');
+  if (d.length === 12 && d.startsWith('380')) return `+${d}`;
+  if (d.length === 10 && d.startsWith('0')) return `+38${d}`;
+  if (d.length === 9) return `+380${d}`;
+  return String(raw ?? '');
+}
+
+export { displayName, hasAlias, formatPhone, OPERATOR_ALIASES };

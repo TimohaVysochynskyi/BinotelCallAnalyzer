@@ -10,7 +10,7 @@ import {
 } from '../core/store.js';
 import { ROLES, ROLE_LABELS, invalidateRole } from './access.js';
 import { operatorLabel } from './keyboards.js';
-import { displayName } from './operators.js';
+import { displayName, formatPhone } from './operators.js';
 import { showScreen } from './ui.js';
 
 // Only these three roles are managed from the UI (directors are seeded from env / promoted in DB;
@@ -25,10 +25,10 @@ function fullName(ctx) {
 
 // A short human line describing a member for the list / detail screens.
 function memberLine(u) {
-  const name = u.displayName || (u.username ? `@${u.username}` : null) || (u.phone ? `+${u.phone}` : `id${u.telegramId ?? '—'}`);
+  const name = u.displayName || (u.username ? `@${u.username}` : null) || (u.phone ? formatPhone(u.phone) : `id${u.telegramId ?? '—'}`);
   const bits = [];
   if (u.username) bits.push(`@${u.username}`);
-  if (u.phone) bits.push(`+${u.phone}`);
+  if (u.phone) bits.push(formatPhone(u.phone));
   if (u.operatorName) bits.push(`оператор: ${displayName(u.operatorName)}`);
   if (u.status === 'pending') bits.push('⏳ очікує входу');
   return bits.length ? `${name} (${bits.join(', ')})` : name;
@@ -47,7 +47,7 @@ async function roleListScreen(role) {
   const users = await getBotUsersByRole(role);
   const kb = new InlineKeyboard();
   for (const u of users) {
-    const label = u.displayName || (u.username ? `@${u.username}` : null) || (u.phone ? `+${u.phone}` : `id${u.telegramId}`);
+    const label = u.displayName || (u.username ? `@${u.username}` : null) || (u.phone ? formatPhone(u.phone) : `id${u.telegramId}`);
     kb.text(`${u.status === 'pending' ? '⏳ ' : ''}${label}`, `roles:u:${u.id}`).row();
   }
   kb.text('➕ Додати', `roles:add:${role}`).row();
@@ -144,7 +144,7 @@ async function addByUsersShared(ctx, role) {
 // immediately; otherwise we only have a phone → store a pending invite the person claims on /start.
 async function addByContact(ctx, role) {
   const c = ctx.message.contact;
-  const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || (c.phone_number ? `+${c.phone_number}` : 'контакт');
+  const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || (c.phone_number ? formatPhone(c.phone_number) : 'контакт');
   ctx.session.awaiting = null;
   let memberId;
   if (c.user_id) {
@@ -176,7 +176,7 @@ async function addByPhoneText(ctx, role) {
   await ctx.reply('ℹ️ Додав як запрошення за номером. Людина увійде, коли відкриє бота й поділиться своїм контактом.', {
     reply_markup: { remove_keyboard: true },
   });
-  await afterAdded(ctx, role, memberId, `+${phone}`);
+  await afterAdded(ctx, role, memberId, formatPhone(phone));
 }
 
 // --- Registration --------------------------------------------------------------------------

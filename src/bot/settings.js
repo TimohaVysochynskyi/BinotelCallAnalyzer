@@ -7,6 +7,7 @@ import {
   addReportTime,
   removeReportTime,
 } from '../core/store.js';
+import { formatPhone } from './operators.js';
 import { showScreen } from './ui.js';
 
 // Admin-only "Налаштування" (/settings, native "Menu" button — deliberately NOT an inline main-menu
@@ -145,7 +146,7 @@ async function addByContact(ctx, kind) {
     await showScreen(ctx, text, kb, { parseMode: null });
     return;
   }
-  const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || `+${c.phone_number}`;
+  const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || formatPhone(c.phone_number);
   await addRecipient(kind, { id: c.user_id, name });
   ctx.session.awaiting = null;
   await afterAdded(ctx, kind, name);

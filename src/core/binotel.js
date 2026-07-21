@@ -48,7 +48,6 @@ async function listCallsForPeriod(startDate, endDate) {
     // for 903). Shared-handset extensions may not carry a name - callers fall back to the
     // raw internalNumber when this is empty.
     employeeName: c.employeeData?.name || null,
-    callType: c.callType,
     startTime: new Date(Number(c.startTime) * 1000).toISOString(),
     durationSec: Number(c.billsec || 0),
     recordingStatus: c.recordingStatus,

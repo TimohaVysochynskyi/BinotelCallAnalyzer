@@ -50,6 +50,9 @@ OPENAI_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe
 OPENAI_ANALYZE_MODEL=gpt-4o-mini
 OPENAI_EMBED_MODEL=text-embedding-3-small
 CALL_LANGUAGE=
+ELEVENLABS_API_KEY=...            # primary transcriber (STT + diarization); empty = OpenAI fallback
+ELEVENLABS_STT_MODEL=scribe_v1
+ELEVENLABS_NUM_SPEAKERS=2
 JOB_TYPE=poll
 POLL_WINDOW_MINUTES=20
 SHARED_EXTENSIONS=901,902
@@ -60,6 +63,8 @@ OPERATOR_ALIASES=
 ```
 
 > Куди слати алерти/звіти ТА о котрій — більше НЕ в env, а в БД, кероване в боті: `/settings` → «Сповіщення про поломки» / «Щоденні звіти» / «Час звітів». На чистій БД списки отримувачів порожні; після старту зайдіть у бот і додайте їх (для групи-алертів — опція «числовий ID чату»). Час звітів до редагування = дефолт 13:00/19:30. Прибрані env-змінні: `TELEGRAM_CHAT_ID`, `BOT_REPORT_CHAT_ID`, `BOT_REPORT_TIMES`. `BOT_ALLOWED_CHAT_IDS` → `TELEGRAM_BOOTSTRAP_CHAT_IDS`.
+
+Транскрипція йде через **ElevenLabs STT (Scribe)** — транскрипція + розділення мовців в одному виклику, готовий діалог зберігається одразу. Для ~50 дзвінків/день потрібен план **Scale** (~$330/міс; STT = 330 кредитів/хв). Без `ELEVENLABS_API_KEY` (або якщо API впав) — автоматичний fallback на OpenAI-транскрипцію (без розділення мовців), дзвінок не губиться.
 
 База знань бота потребує **pgvector** — `migrateKb()` створює розширення сам (`CREATE EXTENSION IF NOT EXISTS vector`); Neon підтримує (перевірено, v0.8.1). Нема розширення → база знань просто вимкнеться, решта бота живе.
 

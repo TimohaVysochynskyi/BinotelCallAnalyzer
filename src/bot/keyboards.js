@@ -1,6 +1,6 @@
 import { InlineKeyboard } from "grammy";
 import { shortDate } from "./time.js";
-import { displayName, hasAlias } from "./operators.js";
+import { displayName, hasAlias, formatPhone } from "./operators.js";
 import { isAdmin, ROLES } from "./access.js";
 
 const PERIODS = [
@@ -38,10 +38,14 @@ function mainMenu(role) {
 
 function operatorLabel(name) {
   // Operators in the picker are personal numbers assigned to managers, so a named/aliased operator
-  // gets the 📱 (mobile) label (client's request — visually "a personal number"). Only a still
-  // unattributed shared handset keeps the ☎️ "Спільний" label.
+  // gets the 📱 (mobile) label (client's request — visually "a personal number"). A phone-shaped
+  // numeric name is shown as +380…; only a short shared extension (901/902) keeps ☎️ "Спільний".
   if (hasAlias(name)) return `📱 ${displayName(name)}`;
-  return /^[0-9]+$/.test(name) ? `☎️ Спільний ${name}` : `📱 ${name}`;
+  if (/^[0-9]+$/.test(name)) {
+    const phone = formatPhone(name);
+    return phone !== name ? `📱 ${phone}` : `☎️ Спільний ${name}`;
+  }
+  return `📱 ${name}`;
 }
 
 // operators: [{ name, n, firstCall? }]. prefix is 'stat' or 'arch'; the operator name is the

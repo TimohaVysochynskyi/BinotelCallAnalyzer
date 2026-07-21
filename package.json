@@ -12,7 +12,8 @@
     "bot": "node src/bot/index.js",
     "test:call": "node src/scripts/testSingleCall.js",
     "backfill": "node src/scripts/backfill.js",
-    "reattribute:shared": "node src/scripts/reattributeShared.js"
+    "reattribute:shared": "node src/scripts/reattributeShared.js",
+    "retranscribe:recent": "node src/scripts/retranscribeRecent.js"
   },
   "dependencies": {
     "dejavu-fonts-ttf": "^2.37.3",

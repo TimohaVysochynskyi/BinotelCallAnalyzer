@@ -56,7 +56,6 @@ async function transcribeClassifyAndSave(call, roster) {
     generalCallId: call.generalCallId,
     internalNumber: call.internalNumber,
     managerName,
-    callType: call.callType,
     startTime: call.startTime,
     durationSec: call.durationSec,
     transcript,

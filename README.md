@@ -3,7 +3,7 @@
 Інжест-пайплайн дзвінків автосервісу. Один cron-джоб (`JOB_TYPE=poll`), що запускається кожні ~15 хв:
 
 1. Бере нові дзвінки з Binotel з моменту останнього успішного запуску (чекпоінт, не фіксоване вікно)
-2. Транскрибує запис через OpenAI
+2. Транскрибує запис через ElevenLabs (STT + розділення мовців в одному виклику) → зберігає готовий діалог; fallback — OpenAI, якщо ElevenLabs недоступний
 3. Класифікує дзвінок (успішність / найслабший етап / оцінка 1–10)
 4. Визначає, **якому менеджеру** належить дзвінок, і зберігає все в Postgres
 
@@ -15,7 +15,7 @@
 
 ```
 src/
-  core/     — спільне ядро (store, binotel, transcribe, classifyCall, identifyManager, telegram, retry)
+  core/     — спільне ядро (store, binotel, transcribe, elevenlabs, classifyCall, identifyManager, telegram, retry)
   jobs/     — задеплоєний cron-джоб інжесту (index.js + pollNewCalls + processCalls)
   scripts/  — одноразові тули (backfill, testSingleCall, reattributeShared)
   bot/      — Telegram-бот звітності (grammy, окремий токен): авто-звіти, статистика, архів розмов
@@ -64,6 +64,7 @@ npm run bot                               # запустити бот звітн
 npm run test:call -- <generalCallID>      # смок-тест транскрипції одного дзвінка (без БД)
 npm run backfill -- "2026-07-01 00:00:00" "2026-07-03 23:59:59"   # історичний період
 npm run reattribute:shared               # переприв'язати старі 901/902 до людей (AI)
+npm run retranscribe:recent              # одноразово: останні 5 дзвінків кожного менеджера+Богдан → ElevenLabs (діаризація)
 ```
 
 Backfill: дати в локальному часі машини, період ріжеться на шматки ≤23 год (ліміт Binotel), вже оброблені дзвінки пропускаються — безпечно перезапускати.

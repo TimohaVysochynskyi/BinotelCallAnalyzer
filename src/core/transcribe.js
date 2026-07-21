@@ -1,4 +1,5 @@
 import { withRetry } from './retry.js';
+import { transcribeDiarized } from './elevenlabs.js';
 
 // Business is a Ukrainian auto-service. Ukrainian phone speech is full of dialect/surzhyk
 // ("да" замість "так", "шо", "тіки"), which the ASR often mislabels as Russian and writes in
@@ -93,7 +94,22 @@ async function transcribeAudio(audioUrl) {
     },
     { attempts: 3, delayMs: 1000, label: 'download recording' }
   );
-  console.log(`[transcribe] downloaded ${audioBlob.size} bytes, sending to OpenAI...`);
+  console.log(`[transcribe] downloaded ${audioBlob.size} bytes`);
+
+  // Primary path: ElevenLabs (Scribe) — transcription + speaker diarization in one call, returning
+  // a ready "Менеджер:/Клієнт:" dialogue that the archive shows instantly (no second request). If
+  // it fails (no key / API error / quota), fall through to the OpenAI path below so no call is lost.
+  if (process.env.ELEVENLABS_API_KEY) {
+    try {
+      const dialogue = await transcribeDiarized(audioBlob);
+      console.log(`[transcribe] ElevenLabs OK — ${dialogue.length} chars (diarized)`);
+      return dialogue;
+    } catch (err) {
+      console.error(`[transcribe] ElevenLabs failed, falling back to OpenAI: ${err.message}`);
+    }
+  }
+
+  console.log('[transcribe] transcribing via OpenAI (plain, no diarization)...');
 
   // Explicit override: force a language, skip detection.
   const forced = process.env.CALL_LANGUAGE;

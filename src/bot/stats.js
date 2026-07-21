@@ -1,7 +1,7 @@
 import { InlineKeyboard, Keyboard } from 'grammy';
 import { getOperators, getOperatorStats, getOperatorCallsWithTranscripts, listOperatorNotes } from '../core/store.js';
 import { operatorListKeyboard, periodKeyboard, operatorLabel } from './keyboards.js';
-import { displayName } from './operators.js';
+import { displayName, formatPhone } from './operators.js';
 import { analyzeManager } from './analyze.js';
 import { periodRange, formatKyiv } from './time.js';
 import { sendLong, showScreen, withProgress } from './ui.js';
@@ -136,7 +136,7 @@ function registerMyReport(bot) {
     const { start, end, label } = periodRange(period);
     const s = await getOperatorStats(name, start, end);
     const rate = s.callCount ? Math.round((s.successCount / s.callCount) * 100) : 0;
-    const phone = ctx.botUser?.phone ? `+${ctx.botUser.phone}` : 'не збережено';
+    const phone = ctx.botUser?.phone ? formatPhone(ctx.botUser.phone) : 'не збережено';
     // Numeric block stays on top; the AI analysis (same /prompt) follows below.
     const header =
       `📊 *Мій звіт* — ${label}\n` +

@@ -9,6 +9,10 @@ import { sendLong, withProgress, showScreen } from './ui.js';
 
 const PAGE = 8;
 
+// A transcript ingested via ElevenLabs is already a "Менеджер:/Клієнт:" dialogue — show it as is,
+// instantly. Only the older/plain (OpenAI-fallback) transcripts need on-demand formatting.
+const looksDiarized = (t) => /(^|\n)\s*(Менеджер|Клієнт)\s*:/.test(t || '');
+
 function shortKyiv(date) {
   const p = kyivParts(new Date(date));
   const pad = (n) => String(n).padStart(2, '0');
@@ -79,27 +83,31 @@ function registerArchive(bot) {
       `📞 *Дзвінок* ${gid}\n` +
       `Менеджер: ${displayName(c.managerName) ?? '—'}\n` +
       `Час: ${formatKyiv(new Date(c.startTime))}\n` +
-      `Тип: ${c.callType ?? '—'}, тривалість: ${c.durationSec ?? '—'} с\n` +
+      `Тривалість: ${c.durationSec ?? '—'} с\n` +
       `Успіх: ${c.isSuccess ? 'так' : 'ні'}, бал: ${c.communicationScore ?? '—'}, слабкий етап: ${c.weakestStage ?? '—'}`;
     // sendLong (not ctx.reply) so a manager name with markdown chars falls back to plain text.
     await sendLong(ctx.api, ctx.chat.id, header, { parseMode: 'Markdown' });
-    // Reformat the raw mono transcript into a Менеджер/Клієнт dialogue (AI, ~10-20s). On failure
-    // fall back to the raw text so the call is always viewable. Generated on-demand, no cache yet.
-    let dialogue;
-    try {
-      dialogue = await withProgress(
-        ctx.api,
-        ctx.chat.id,
-        'typing',
-        () => formatDialogue(c.transcript),
-        { notice: '⏳ Форматую розмову у діалог…' }
-      );
-    } catch (err) {
-      console.error(`[bot] dialogue format ${gid} failed: ${err.message}`);
-      dialogue = c.transcript || '(порожньо)';
+    if (looksDiarized(c.transcript)) {
+      // Already a dialogue (ElevenLabs diarization at ingest) — show instantly, no extra request.
+      await sendLong(ctx.api, ctx.chat.id, `📝 Розмова:\n\n${c.transcript}`);
+    } else {
+      // Older/plain transcript (pre-ElevenLabs or OpenAI fallback): format on-demand (~10-20s).
+      // On failure fall back to raw text so the call is always viewable.
+      let dialogue;
+      try {
+        dialogue = await withProgress(
+          ctx.api,
+          ctx.chat.id,
+          'typing',
+          () => formatDialogue(c.transcript),
+          { notice: '⏳ Форматую розмову у діалог…' }
+        );
+      } catch (err) {
+        console.error(`[bot] dialogue format ${gid} failed: ${err.message}`);
+        dialogue = c.transcript || '(порожньо)';
+      }
+      await sendLong(ctx.api, ctx.chat.id, `📝 Розмова:\n\n${dialogue}`);
     }
-    // Plain text - the dialogue can contain characters that break markdown entities.
-    await sendLong(ctx.api, ctx.chat.id, `📝 Розмова:\n\n${dialogue}`);
     await ctx.reply('Аудіо запису:', {
       reply_markup: new InlineKeyboard().text('🎧 Прослухати запис', `arch:play:${gid}`).row().text('« Меню', 'menu'),
     });

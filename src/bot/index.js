@@ -17,7 +17,7 @@ import { registerPrompt, openPromptMenu } from './prompt.js';
 import { registerRoles, openRolesMenu, addByPhoneText } from './roles.js';
 import { registerSettings, openSettings, addRecipientByIdText } from './settings.js';
 import { setAnalyzePrompt } from './analyze.js';
-import { displayName } from './operators.js';
+import { displayName, formatPhone } from './operators.js';
 import {
   getUser,
   canAccess,
@@ -225,7 +225,7 @@ bot.on('message:contact', async (ctx) => {
   await setBotUserPhone(ctx.from.id, c.phone_number);
   invalidateRole(ctx.from.id);
   ctx.session.awaiting = null;
-  await ctx.reply(`✅ Номер збережено: +${normalizePhone(c.phone_number)}.`, { reply_markup: { remove_keyboard: true } });
+  await ctx.reply(`✅ Номер збережено: ${formatPhone(c.phone_number)}.`, { reply_markup: { remove_keyboard: true } });
   await showScreen(ctx, 'Оберіть дію:', mainMenu(ctx.role));
 });
 

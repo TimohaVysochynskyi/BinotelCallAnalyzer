@@ -14,7 +14,6 @@ async function migrate() {
       general_call_id TEXT UNIQUE NOT NULL,
       internal_number TEXT,
       manager_name TEXT,
-      call_type TEXT,
       start_time TIMESTAMPTZ,
       duration_sec INTEGER,
       transcript TEXT,
@@ -32,7 +31,6 @@ async function migrate() {
       general_call_id TEXT PRIMARY KEY,
       internal_number TEXT,
       manager_name TEXT,
-      call_type TEXT,
       start_time TIMESTAMPTZ,
       duration_sec INTEGER,
       attempts INTEGER NOT NULL DEFAULT 0,
@@ -67,6 +65,11 @@ async function migrate() {
     ALTER TABLE calls DROP COLUMN IF EXISTS manager_id;
     ALTER TABLE manager_notes DROP COLUMN IF EXISTS manager_id;
     DROP TABLE IF EXISTS managers;
+
+    -- call_type (incoming/outgoing marker from Binotel) removed by request — dropped from all rows
+    -- (new and old). Idempotent: a no-op once applied.
+    ALTER TABLE calls DROP COLUMN IF EXISTS call_type;
+    ALTER TABLE pending_calls DROP COLUMN IF EXISTS call_type;
 
     -- Bot access control (role system). Purely for AUTHORIZING who may use the bot and which
     -- features they see — NOT a revival of the old attribution "managers" table (Binotel stays
@@ -193,14 +196,13 @@ async function callExists(generalCallId) {
 
 async function saveCall(call) {
   await pool.query(
-    `INSERT INTO calls (general_call_id, internal_number, manager_name, call_type, start_time, duration_sec, transcript, is_success, weakest_stage, communication_score)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    `INSERT INTO calls (general_call_id, internal_number, manager_name, start_time, duration_sec, transcript, is_success, weakest_stage, communication_score)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      ON CONFLICT (general_call_id) DO NOTHING`,
     [
       call.generalCallId,
       call.internalNumber,
       call.managerName,
-      call.callType,
       call.startTime,
       call.durationSec,
       call.transcript,
@@ -265,7 +267,7 @@ async function countOperatorCalls(name, start, end) {
 
 async function listOperatorCalls(name, start, end, limit, offset) {
   const { rows } = await pool.query(
-    `SELECT general_call_id AS "generalCallId", start_time AS "startTime", call_type AS "callType",
+    `SELECT general_call_id AS "generalCallId", start_time AS "startTime",
             is_success AS "isSuccess", communication_score AS "communicationScore"
      FROM calls
      WHERE manager_name = $1 AND start_time >= $2 AND start_time < $3
@@ -293,10 +295,25 @@ async function getOperatorCallsWithTranscripts(name, start, end) {
   return rows;
 }
 
+// The N most recent calls of an operator (any period). Used by the one-off re-transcription script.
+async function getRecentCallsForOperator(name, limit = 5) {
+  const { rows } = await pool.query(
+    `SELECT general_call_id AS "generalCallId", start_time AS "startTime"
+     FROM calls WHERE manager_name = $1
+     ORDER BY start_time DESC LIMIT $2`,
+    [name, limit]
+  );
+  return rows;
+}
+
+async function updateCallTranscript(generalCallId, transcript) {
+  await pool.query('UPDATE calls SET transcript = $2 WHERE general_call_id = $1', [generalCallId, transcript]);
+}
+
 async function getCallByGeneralId(generalCallId) {
   const { rows } = await pool.query(
     `SELECT general_call_id AS "generalCallId", manager_name AS "managerName",
-            internal_number AS "internalNumber", call_type AS "callType", start_time AS "startTime",
+            internal_number AS "internalNumber", start_time AS "startTime",
             duration_sec AS "durationSec", transcript, is_success AS "isSuccess",
             weakest_stage AS "weakestStage", communication_score AS "communicationScore"
      FROM calls WHERE general_call_id = $1`,
@@ -476,13 +493,13 @@ async function deleteKbDoc(id) {
 
 async function upsertPending(call, errorMessage) {
   await pool.query(
-    `INSERT INTO pending_calls (general_call_id, internal_number, manager_name, call_type, start_time, duration_sec, attempts, status, last_error, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, 1, 'pending', $7, now())
+    `INSERT INTO pending_calls (general_call_id, internal_number, manager_name, start_time, duration_sec, attempts, status, last_error, updated_at)
+     VALUES ($1, $2, $3, $4, $5, 1, 'pending', $6, now())
      ON CONFLICT (general_call_id) DO UPDATE SET
        attempts = pending_calls.attempts + 1,
-       last_error = $7,
+       last_error = $6,
        updated_at = now()`,
-    [call.generalCallId, call.internalNumber, call.managerName, call.callType, call.startTime, call.durationSec, errorMessage || null]
+    [call.generalCallId, call.internalNumber, call.managerName, call.startTime, call.durationSec, errorMessage || null]
   );
 }
 
@@ -493,7 +510,7 @@ async function markPendingFailed(generalCallId) {
 async function getPendingCalls() {
   const { rows } = await pool.query(
     `SELECT general_call_id AS "generalCallId", internal_number AS "internalNumber", manager_name AS "managerName",
-            call_type AS "callType", start_time AS "startTime", duration_sec AS "durationSec", attempts
+            start_time AS "startTime", duration_sec AS "durationSec", attempts
      FROM pending_calls
      WHERE status = 'pending'
      ORDER BY start_time`
@@ -633,6 +650,8 @@ export {
   getOperators,
   getOperatorStats,
   getOperatorCallsWithTranscripts,
+  getRecentCallsForOperator,
+  updateCallTranscript,
   countOperatorCalls,
   listOperatorCalls,
   getCallByGeneralId,
