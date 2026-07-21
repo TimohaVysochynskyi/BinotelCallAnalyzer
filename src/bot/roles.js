@@ -273,9 +273,13 @@ function registerRoles(bot) {
 
   // Adding people: request_users picker and shared contacts. Guarded by the awaiting role_add
   // state so a stray shared contact from someone not in the add flow is ignored here.
-  bot.on('message:users_shared', async (ctx) => {
+  bot.on('message:users_shared', async (ctx, next) => {
     const st = ctx.session.awaiting;
-    if (st?.type !== 'role_add') return;
+    // Not our add flow (e.g. a settings recipient pick) — let later handlers run.
+    if (st?.type !== 'role_add') {
+      if (next) await next();
+      return;
+    }
     await addByUsersShared(ctx, st.role);
   });
 

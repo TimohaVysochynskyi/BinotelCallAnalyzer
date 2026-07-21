@@ -5,17 +5,14 @@ import {
   setReportSlot,
   getReportUntil,
   setReportUntil,
+  getRecipients,
+  getReportTimes,
 } from '../core/store.js';
 import { analyzeManager } from './analyze.js';
 import { withProgress } from './ui.js';
 import { generateReportPdf } from './pdfReport.js';
 import { displayName } from './operators.js';
 import { kyivParts, startOfDay, formatKyiv, shortDate } from './time.js';
-
-const REPORT_TIMES = (process.env.BOT_REPORT_TIMES || '13:00,19:30')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean);
 
 function groupByManager(rows) {
   const groups = new Map();
@@ -60,19 +57,48 @@ async function buildReport(start, end) {
   return { managerReports, totalCalls: rows.length, periodLabel };
 }
 
-// Generates the PDF report and sends it as a document. Used by BOTH the scheduled reports
-// (13:00 / 19:30) and the manual "Звіт зараз", so the format is identical everywhere.
-async function sendReport(api, chatId, start, end) {
-  const built = await buildReport(start, end);
-  if (!built) return { sent: false, empty: true };
-
+// Renders the built report into a ready-to-send PDF (Buffer) + filename + caption. Kept separate
+// from sending so the same PDF can be built once and delivered to several recipients.
+function renderReport(built, start, end) {
   const { managerReports, totalCalls, periodLabel } = built;
-  const pdf = await generateReportPdf(managerReports, { periodLabel });
+  const pdf = generateReportPdf(managerReports, { periodLabel }); // Promise<Buffer>
   const filename = `zvit_${shortDate(start).replace(/\./g, '-')}_${shortDate(end).replace(/\./g, '-')}.pdf`;
   const caption =
     `📊 Звіт за період\n${periodLabel}\n` +
     `Менеджерів: ${managerReports.length}, дзвінків: ${totalCalls}`;
-  await api.sendDocument(chatId, new InputFile(pdf, filename), { caption });
+  return { pdf, filename, caption };
+}
+
+// Generates the PDF report and sends it to ONE chat. Used by the manual "Звіт зараз" (goes to the
+// requester's own chat). The format is identical to the scheduled report.
+async function sendReport(api, chatId, start, end) {
+  const built = await buildReport(start, end);
+  if (!built) return { sent: false, empty: true };
+  const { pdf, filename, caption } = renderReport(built, start, end);
+  await api.sendDocument(chatId, new InputFile(await pdf, filename), { caption });
+  return { sent: true };
+}
+
+// Scheduled report: build the PDF once and fan it out to every recipient configured in the bot's
+// /settings → "Щоденні звіти" (app_state.report_recipients). Replaces the old single
+// BOT_REPORT_CHAT_ID env target. A failed send to one recipient doesn't block the others.
+async function sendScheduledReport(api, start, end) {
+  const built = await buildReport(start, end);
+  if (!built) return { sent: false, empty: true };
+  const recipients = await getRecipients('report');
+  if (recipients.length === 0) {
+    console.warn('[bot] scheduled report: no recipients configured (Налаштування) - not sent');
+    return { sent: false, empty: false };
+  }
+  const { pdf, filename, caption } = renderReport(built, start, end);
+  const buffer = await pdf;
+  for (const r of recipients) {
+    try {
+      await api.sendDocument(r.id, new InputFile(buffer, filename), { caption });
+    } catch (err) {
+      console.error(`[bot] scheduled report to ${r.id} failed: ${err.message}`);
+    }
+  }
   return { sent: true };
 }
 
@@ -99,10 +125,13 @@ let running = false;
 // (or start of today on the very first run), so back-to-back slots never overlap or leave a
 // gap. Slot dedup (app_state.last_report_slot) survives restarts; the in-memory lock prevents
 // a double-fire within the same minute.
-async function maybeSendScheduledReport(api, chatId) {
+async function maybeSendScheduledReport(api) {
   const now = new Date();
   const { dateStr, hhmm } = kyivParts(now);
-  if (!REPORT_TIMES.includes(hhmm)) return;
+  // Times are managed in /settings (app_state.report_times), read every tick so edits apply
+  // without a restart.
+  const times = await getReportTimes();
+  if (!times.includes(hhmm)) return;
 
   const slotKey = `${dateStr}-${hhmm}`;
   if (running) return;
@@ -113,7 +142,7 @@ async function maybeSendScheduledReport(api, chatId) {
     const end = now;
     const start = (await getReportUntil()) || startOfDay(now);
     console.log(`[bot] scheduled report slot ${slotKey}: ${start.toISOString()} -> ${end.toISOString()}`);
-    const res = await sendReport(api, chatId, start, end);
+    const res = await sendScheduledReport(api, start, end);
     await setReportSlot(slotKey);
     await setReportUntil(end);
     if (res.empty) console.log('[bot] scheduled report: nothing to send this period');
@@ -122,10 +151,12 @@ async function maybeSendScheduledReport(api, chatId) {
   }
 }
 
-function startScheduler(api, chatId) {
-  console.log(`[bot] report scheduler on for ${REPORT_TIMES.join(', ')} (Kyiv), recipient chat ${chatId}`);
+// Both the times and the recipients are read from the DB on every tick (managed in /settings), so
+// the scheduler always runs — no env to configure. With no times/recipients set it simply skips.
+function startScheduler(api) {
+  console.log('[bot] report scheduler on (times + recipients from /settings, Kyiv)');
   setInterval(() => {
-    maybeSendScheduledReport(api, chatId).catch((e) => console.error(`[bot] scheduled report error: ${e.message}`));
+    maybeSendScheduledReport(api).catch((e) => console.error(`[bot] scheduled report error: ${e.message}`));
   }, 30000);
 }
 

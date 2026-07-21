@@ -175,8 +175,8 @@ async function deleteBotUser(id) {
   return rows[0] || null;
 }
 
-// Bootstrap: make sure a chat id is a director (used to seed TELEGRAM_CHAT_ID at startup so the
-// owner can never lock themselves out). Never downgrades an existing row.
+// Bootstrap: make sure a chat id is a director (used to seed TELEGRAM_BOOTSTRAP_CHAT_IDS at
+// startup so the owner can never lock themselves out). Never downgrades an existing row.
 async function seedDirector(telegramId) {
   await pool.query(
     `INSERT INTO bot_users (telegram_id, role, display_name, status)
@@ -277,6 +277,22 @@ async function listOperatorCalls(name, start, end, limit, offset) {
   return rows;
 }
 
+// One manager's calls with transcripts in [start, end) — feeds the per-period AI analysis in the
+// bot's "Статистика менеджера" / "Мій звіт" (analyze.js: analyzeManager). Same shape analyzeManager
+// expects; same transcript filter as getOperatorStats so counts line up.
+async function getOperatorCallsWithTranscripts(name, start, end) {
+  const { rows } = await pool.query(
+    `SELECT transcript, start_time AS "startTime", is_success AS "isSuccess",
+            weakest_stage AS "weakestStage", communication_score AS "communicationScore"
+     FROM calls
+     WHERE manager_name = $1 AND start_time >= $2 AND start_time < $3
+       AND transcript IS NOT NULL AND transcript <> ''
+     ORDER BY start_time`,
+    [name, start, end]
+  );
+  return rows;
+}
+
 async function getCallByGeneralId(generalCallId) {
   const { rows } = await pool.query(
     `SELECT general_call_id AS "generalCallId", manager_name AS "managerName",
@@ -359,6 +375,12 @@ async function migrateKb() {
     ALTER TABLE kb_docs ADD COLUMN IF NOT EXISTS file_id TEXT;
     ALTER TABLE kb_docs ADD COLUMN IF NOT EXISTS mime TEXT;
 
+    -- Audience = which employee role a manual is FOR: 'mechanic' | 'manager' | 'both'. Filters KB
+    -- answers so a mechanic never gets a manager's sales manual and vice versa (director/marketer
+    -- see everything). NOT NULL DEFAULT 'mechanic' also backfills pre-existing rows to 'mechanic'
+    -- (per the client's request that current files belong to mechanics).
+    ALTER TABLE kb_docs ADD COLUMN IF NOT EXISTS audience TEXT NOT NULL DEFAULT 'mechanic';
+
     CREATE TABLE IF NOT EXISTS kb_chunks (
       id SERIAL PRIMARY KEY,
       doc_id INTEGER NOT NULL REFERENCES kb_docs(id) ON DELETE CASCADE,
@@ -368,44 +390,61 @@ async function migrateKb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
     CREATE INDEX IF NOT EXISTS kb_chunks_embedding_idx ON kb_chunks USING hnsw (embedding vector_cosine_ops);
+
+    -- Page range a chunk came from (PDF only; NULL for DOCX/TXT which have no pages). Lets a KB
+    -- answer cite the exact page(s). Chunks ingested before this column stay NULL (no page shown).
+    ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS page_start INTEGER;
+    ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS page_end INTEGER;
   `);
 }
 
 const vecToStr = (arr) => `[${arr.join(',')}]`;
 
-async function insertKbDoc(filename, uploadedBy, fileId, mime) {
+async function insertKbDoc(filename, uploadedBy, fileId, mime, audience = 'mechanic') {
   const { rows } = await pool.query(
-    'INSERT INTO kb_docs (filename, uploaded_by, file_id, mime) VALUES ($1, $2, $3, $4) RETURNING id',
-    [filename, uploadedBy || null, fileId || null, mime || null]
+    'INSERT INTO kb_docs (filename, uploaded_by, file_id, mime, audience) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+    [filename, uploadedBy || null, fileId || null, mime || null, audience]
   );
   return rows[0].id;
 }
 
-// chunks: [{ ord, content, embedding: number[] }]
+// chunks: [{ ord, content, embedding: number[], pageStart?: number|null, pageEnd?: number|null }]
 async function insertKbChunks(docId, chunks) {
   for (const c of chunks) {
     await pool.query(
-      'INSERT INTO kb_chunks (doc_id, ord, content, embedding) VALUES ($1, $2, $3, $4::vector)',
-      [docId, c.ord, c.content, vecToStr(c.embedding)]
+      'INSERT INTO kb_chunks (doc_id, ord, content, embedding, page_start, page_end) VALUES ($1, $2, $3, $4::vector, $5, $6)',
+      [docId, c.ord, c.content, vecToStr(c.embedding), c.pageStart ?? null, c.pageEnd ?? null]
     );
   }
   await pool.query('UPDATE kb_docs SET chunk_count = $2 WHERE id = $1', [docId, chunks.length]);
 }
 
-async function searchKbChunks(queryEmbedding, k = 6) {
+// audiences: null/undefined => search everything (director/marketer); an array (e.g.
+// ['manager','both']) => only chunks from docs for that role, so KB answers never leak across roles.
+// Returns chunkId (dedup across multi-query search), page range (source citation) and docId
+// (deep-link to the original file) alongside the content.
+async function searchKbChunks(queryEmbedding, k = 6, audiences = null) {
+  const params = [vecToStr(queryEmbedding), k];
+  let filter = '';
+  if (audiences && audiences.length) {
+    params.push(audiences);
+    filter = `WHERE d.audience = ANY($3)`;
+  }
   const { rows } = await pool.query(
-    `SELECT c.content, d.filename, d.id AS "docId", (c.embedding <=> $1::vector) AS dist
+    `SELECT c.id AS "chunkId", c.content, c.page_start AS "pageStart", c.page_end AS "pageEnd",
+            d.filename, d.id AS "docId", (c.embedding <=> $1::vector) AS dist
      FROM kb_chunks c JOIN kb_docs d ON d.id = c.doc_id
+     ${filter}
      ORDER BY c.embedding <=> $1::vector
      LIMIT $2`,
-    [vecToStr(queryEmbedding), k]
+    params
   );
   return rows;
 }
 
 async function listKbDocs() {
   const { rows } = await pool.query(
-    `SELECT id, filename, chunk_count AS "chunkCount", created_at AS "createdAt"
+    `SELECT id, filename, chunk_count AS "chunkCount", audience, created_at AS "createdAt"
      FROM kb_docs ORDER BY created_at DESC`
   );
   return rows;
@@ -418,11 +457,15 @@ async function countKbChunks() {
 
 async function getKbDoc(id) {
   const { rows } = await pool.query(
-    `SELECT id, filename, file_id AS "fileId", mime, chunk_count AS "chunkCount", created_at AS "createdAt"
+    `SELECT id, filename, file_id AS "fileId", mime, chunk_count AS "chunkCount", audience, created_at AS "createdAt"
      FROM kb_docs WHERE id = $1`,
     [id]
   );
   return rows[0] || null;
+}
+
+async function setKbDocAudience(id, audience) {
+  await pool.query('UPDATE kb_docs SET audience = $2 WHERE id = $1', [id, audience]);
 }
 
 async function deleteKbDoc(id) {
@@ -492,6 +535,38 @@ async function clearStoredAnalyzePrompt() {
   await deleteState('analyze_prompt');
 }
 
+// Notification recipients (ingest failure alerts + daily PDF reports). Managed by admins in the
+// bot's /settings screen and stored here as a JSON array of { id, name }: id is a Telegram chat id
+// (a user who has started the bot, or a group), name is a human label shown in the settings list.
+// Replaces the old single TELEGRAM_CHAT_ID / BOT_REPORT_CHAT_ID env vars — both are now lists so a
+// message can fan out to several people. kind is 'alert' | 'report'.
+async function getRecipients(kind) {
+  const raw = await getState(`${kind}_recipients`);
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+async function addRecipient(kind, { id, name }) {
+  const list = await getRecipients(kind);
+  const sid = String(id);
+  if (list.some((r) => String(r.id) === sid)) return list; // already a recipient, no duplicate
+  list.push({ id: sid, name: name || sid });
+  await setState(`${kind}_recipients`, JSON.stringify(list));
+  return list;
+}
+
+async function removeRecipient(kind, id) {
+  const sid = String(id);
+  const list = (await getRecipients(kind)).filter((r) => String(r.id) !== sid);
+  await setState(`${kind}_recipients`, JSON.stringify(list));
+  return list;
+}
+
 async function getCheckpoint() {
   const value = await getState('last_polled_until');
   return value ? new Date(value) : null;
@@ -518,6 +593,38 @@ async function setReportUntil(date) {
   await setState('last_report_until', date.toISOString());
 }
 
+// Kyiv-local times the daily PDF report fires at, managed by admins in /settings (was the
+// BOT_REPORT_TIMES env var). Stored as a JSON array of canonical "HH:MM" strings. An ABSENT key
+// falls back to the default (so behaviour is unchanged until edited); an explicitly stored empty
+// array means "no scheduled reports". report.js reads this on every scheduler tick.
+const DEFAULT_REPORT_TIMES = ['13:00', '19:30'];
+
+async function getReportTimes() {
+  const raw = await getState('report_times');
+  if (raw == null) return [...DEFAULT_REPORT_TIMES];
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [...DEFAULT_REPORT_TIMES];
+  } catch {
+    return [...DEFAULT_REPORT_TIMES];
+  }
+}
+
+async function addReportTime(hhmm) {
+  const list = await getReportTimes();
+  if (list.includes(hhmm)) return list;
+  list.push(hhmm);
+  list.sort();
+  await setState('report_times', JSON.stringify(list));
+  return list;
+}
+
+async function removeReportTime(hhmm) {
+  const list = (await getReportTimes()).filter((t) => t !== hhmm);
+  await setState('report_times', JSON.stringify(list));
+  return list;
+}
+
 export {
   migrate,
   callExists,
@@ -525,6 +632,7 @@ export {
   getOperatorRoster,
   getOperators,
   getOperatorStats,
+  getOperatorCallsWithTranscripts,
   countOperatorCalls,
   listOperatorCalls,
   getCallByGeneralId,
@@ -540,6 +648,7 @@ export {
   listKbDocs,
   countKbChunks,
   getKbDoc,
+  setKbDocAudience,
   deleteKbDoc,
   upsertPending,
   markPendingFailed,
@@ -550,9 +659,15 @@ export {
   setReportSlot,
   getReportUntil,
   setReportUntil,
+  getReportTimes,
+  addReportTime,
+  removeReportTime,
   getStoredAnalyzePrompt,
   setStoredAnalyzePrompt,
   clearStoredAnalyzePrompt,
+  getRecipients,
+  addRecipient,
+  removeRecipient,
   normalizePhone,
   getBotUser,
   getBotUserById,

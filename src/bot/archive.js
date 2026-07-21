@@ -3,6 +3,7 @@ import { getOperators, countOperatorCalls, listOperatorCalls, getCallByGeneralId
 import { getCallRecordUrl } from '../core/binotel.js';
 import { operatorListKeyboard, periodKeyboard, operatorLabel } from './keyboards.js';
 import { displayName } from './operators.js';
+import { formatDialogue } from './dialogue.js';
 import { periodRange, kyivParts, formatKyiv } from './time.js';
 import { sendLong, withProgress, showScreen } from './ui.js';
 
@@ -82,8 +83,23 @@ function registerArchive(bot) {
       `Успіх: ${c.isSuccess ? 'так' : 'ні'}, бал: ${c.communicationScore ?? '—'}, слабкий етап: ${c.weakestStage ?? '—'}`;
     // sendLong (not ctx.reply) so a manager name with markdown chars falls back to plain text.
     await sendLong(ctx.api, ctx.chat.id, header, { parseMode: 'Markdown' });
-    // Transcript as plain text - it can contain characters that break markdown entities.
-    await sendLong(ctx.api, ctx.chat.id, `📝 Розшифровка:\n\n${c.transcript || '(порожньо)'}`);
+    // Reformat the raw mono transcript into a Менеджер/Клієнт dialogue (AI, ~10-20s). On failure
+    // fall back to the raw text so the call is always viewable. Generated on-demand, no cache yet.
+    let dialogue;
+    try {
+      dialogue = await withProgress(
+        ctx.api,
+        ctx.chat.id,
+        'typing',
+        () => formatDialogue(c.transcript),
+        { notice: '⏳ Форматую розмову у діалог…' }
+      );
+    } catch (err) {
+      console.error(`[bot] dialogue format ${gid} failed: ${err.message}`);
+      dialogue = c.transcript || '(порожньо)';
+    }
+    // Plain text - the dialogue can contain characters that break markdown entities.
+    await sendLong(ctx.api, ctx.chat.id, `📝 Розмова:\n\n${dialogue}`);
     await ctx.reply('Аудіо запису:', {
       reply_markup: new InlineKeyboard().text('🎧 Прослухати запис', `arch:play:${gid}`).row().text('« Меню', 'menu'),
     });

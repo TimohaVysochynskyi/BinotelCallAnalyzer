@@ -55,12 +55,11 @@ POLL_WINDOW_MINUTES=20
 SHARED_EXTENSIONS=901,902
 MAX_PENDING_ATTEMPTS=20
 TELEGRAM_BOT_TOKEN=...
-TELEGRAM_CHAT_ID=...            # alerts (a group) + report fallback
-BOT_ALLOWED_CHAT_IDS=...        # bootstrap: user ids seeded as directors
-BOT_REPORT_CHAT_ID=...          # where auto-reports are sent
-BOT_REPORT_TIMES=13:00,19:30
+TELEGRAM_BOOTSTRAP_CHAT_IDS=... # bootstrap: user ids seeded as directors (only Telegram id in env)
 OPERATOR_ALIASES=
 ```
+
+> Куди слати алерти/звіти ТА о котрій — більше НЕ в env, а в БД, кероване в боті: `/settings` → «Сповіщення про поломки» / «Щоденні звіти» / «Час звітів». На чистій БД списки отримувачів порожні; після старту зайдіть у бот і додайте їх (для групи-алертів — опція «числовий ID чату»). Час звітів до редагування = дефолт 13:00/19:30. Прибрані env-змінні: `TELEGRAM_CHAT_ID`, `BOT_REPORT_CHAT_ID`, `BOT_REPORT_TIMES`. `BOT_ALLOWED_CHAT_IDS` → `TELEGRAM_BOOTSTRAP_CHAT_IDS`.
 
 База знань бота потребує **pgvector** — `migrateKb()` створює розширення сам (`CREATE EXTENSION IF NOT EXISTS vector`); Neon підтримує (перевірено, v0.8.1). Нема розширення → база знань просто вимкнеться, решта бота живе.
 

@@ -1,4 +1,5 @@
 import { withRetry } from './retry.js';
+import { getRecipients } from './store.js';
 
 const TELEGRAM_MAX_LENGTH = 4096;
 const CHUNK_TARGET_LENGTH = 3800; // margin below the hard limit for safety
@@ -53,10 +54,9 @@ async function sendChunk(token, chatId, text) {
 
 async function sendMessage(text, { chatId } = {}) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
-  const targetChatId = chatId || process.env.TELEGRAM_CHAT_ID;
 
-  if (!token || !targetChatId) {
-    console.log('[telegram] DRY RUN (no TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID set) - would send:\n');
+  if (!token || !chatId) {
+    console.log('[telegram] DRY RUN (no TELEGRAM_BOT_TOKEN or chatId) - would send:\n');
     console.log(text);
     console.log('\n[telegram] --- end of message ---');
     return;
@@ -68,14 +68,28 @@ async function sendMessage(text, { chatId } = {}) {
   }
   for (const [i, chunk] of chunks.entries()) {
     const prefix = chunks.length > 1 ? `(${i + 1}/${chunks.length})\n` : '';
-    await sendChunk(token, targetChatId, prefix + chunk);
+    await sendChunk(token, chatId, prefix + chunk);
   }
 }
 
+// Alerts fan out to every recipient configured in the bot's /settings → "Сповіщення про поломки"
+// (app_state.alert_recipients, managed by admins). This replaces the old single TELEGRAM_CHAT_ID
+// env target. With no recipients configured the alert is still written to the log, never dropped
+// silently. A failed send to one recipient doesn't block the others.
 async function sendAlert(text) {
-  // Alerts go to TELEGRAM_CHAT_ID (the same default sendMessage uses). A separate alert chat used
-  // to be configurable via TELEGRAM_ADMIN_CHAT_ID, but it was never used and was removed.
-  await sendMessage(`⚠️ ${text}`);
+  const recipients = await getRecipients('alert');
+  if (recipients.length === 0) {
+    console.warn('[telegram] no alert recipients configured (bot → Налаштування) - alert only logged:');
+    console.warn(`⚠️ ${text}`);
+    return;
+  }
+  for (const r of recipients) {
+    try {
+      await sendMessage(`⚠️ ${text}`, { chatId: r.id });
+    } catch (err) {
+      console.error(`[telegram] alert to ${r.id} failed: ${err.message}`);
+    }
+  }
 }
 
 export { sendMessage, sendAlert };

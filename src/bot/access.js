@@ -40,12 +40,13 @@ function featureOf(ctx) {
   if (cq) {
     if (cq === 'menu' || cq === 'noop') return 'menu';
     if (cq === 'kb:ask') return 'kb_ask';
-    if (cq.startsWith('kb:')) return 'kb_edit'; // menu/add/doc/open/del/delok = file management
+    if (cq.startsWith('kb:')) return 'kb_edit'; // menu/add/doc/open/del/delok/aud/audset/audput = file mgmt
     if (cq.startsWith('stat:') || cq.startsWith('note:')) return 'stats_all';
     if (cq.startsWith('arch:')) return 'archive';
     if (cq.startsWith('report')) return 'report';
     if (cq.startsWith('prompt')) return 'prompt';
     if (cq.startsWith('roles')) return 'roles';
+    if (cq === 'set' || cq.startsWith('set:')) return 'settings';
     if (cq.startsWith('me:')) return 'stats_self';
     return 'menu';
   }
@@ -62,6 +63,7 @@ function featureOf(ctx) {
       report: 'report',
       prompt: 'prompt',
       roles: 'roles',
+      settings: 'settings',
       myreport: 'stats_self',
     };
     return map[cmd] ?? 'menu';
@@ -89,15 +91,14 @@ function invalidateRole(telegramId) {
   else roleCache.delete(String(telegramId));
 }
 
-// Seed the owner user ids (from BOT_ALLOWED_CHAT_IDS and TELEGRAM_CHAT_ID, for a smooth
-// migration) as directors at startup so nobody is locked out while roles move into the DB.
-// Roles are keyed by the USER id (ctx.from.id, always positive); TELEGRAM_CHAT_ID is often a
-// GROUP id (negative — reports/alerts go there), which can never match a user, so we skip
-// non-positive ids to avoid seeding a junk director row.
+// Seed the owner user ids (TELEGRAM_BOOTSTRAP_CHAT_IDS) as directors at startup so nobody is
+// locked out on a fresh DB; after that, access is managed in-bot via the "Ролі" block. Roles are
+// keyed by the USER id (ctx.from.id, always positive), so we skip non-positive (group) ids.
 async function seedDirectors() {
   const ids = new Set(
-    [process.env.TELEGRAM_CHAT_ID, ...(process.env.BOT_ALLOWED_CHAT_IDS || '').split(',')]
-      .map((s) => (s || '').trim())
+    (process.env.TELEGRAM_BOOTSTRAP_CHAT_IDS || '')
+      .split(',')
+      .map((s) => s.trim())
       .filter((s) => /^\d+$/.test(s) && Number(s) > 0)
   );
   for (const id of ids) {

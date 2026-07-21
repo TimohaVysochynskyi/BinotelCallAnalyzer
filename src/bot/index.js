@@ -11,10 +11,11 @@ import {
 import { mainMenu } from './keyboards.js';
 import { registerStats, statsPicker, openMyReport } from './stats.js';
 import { registerArchive, archivePicker } from './archive.js';
-import { registerKnowledgeBase, answerQuestion, promptQuestion, openFiles } from './kb.js';
+import { registerKnowledgeBase, answerQuestion, promptQuestion, openFiles, openKbDocById } from './kb.js';
 import { sendManualReport, startScheduler } from './report.js';
 import { registerPrompt, openPromptMenu } from './prompt.js';
 import { registerRoles, openRolesMenu, addByPhoneText } from './roles.js';
+import { registerSettings, openSettings, addRecipientByIdText } from './settings.js';
 import { setAnalyzePrompt } from './analyze.js';
 import { displayName } from './operators.js';
 import {
@@ -40,9 +41,6 @@ const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) {
   throw new Error('TELEGRAM_BOT_TOKEN is not set - put the token of the clean bot from @BotFather there');
 }
-
-// Scheduled reports still go to the owner/admin chat (env), independent of the role table.
-const REPORT_CHAT_ID = process.env.BOT_REPORT_CHAT_ID || process.env.TELEGRAM_CHAT_ID || null;
 
 const bot = new Bot(token);
 // Track outgoing message ids so showScreen knows whether a tapped menu is still at the bottom.
@@ -116,11 +114,12 @@ const CMD = {
   report: { command: 'report', description: '🔄 Звіт зараз' },
   prompt: { command: 'prompt', description: '🧠 Промпт аналізу' },
   roles: { command: 'roles', description: '👥 Ролі' },
+  settings: { command: 'settings', description: '⚙️ Налаштування' },
   myreport: { command: 'myreport', description: '📊 Мій звіт' },
 };
 
 function commandsForRole(role) {
-  if (isAdmin(role)) return [CMD.menu, CMD.stats, CMD.archive, CMD.ask, CMD.files, CMD.report, CMD.prompt, CMD.roles];
+  if (isAdmin(role)) return [CMD.menu, CMD.stats, CMD.archive, CMD.ask, CMD.files, CMD.report, CMD.prompt, CMD.roles, CMD.settings];
   if (role === ROLES.MANAGER) return [CMD.menu, CMD.myreport, CMD.ask];
   return [CMD.menu, CMD.ask]; // mechanic
 }
@@ -167,6 +166,14 @@ async function runReport(ctx) {
 
 // --- Commands (native "Menu" button next to the input lists these) -------------------------
 bot.command('start', async (ctx) => {
+  // Deep-link from a KB source citation: /start kbdoc_<id> → resend that original file (role-checked
+  // inside openKbDocById), then stop — don't show the welcome/menu over it.
+  const payload = (ctx.match || '').trim();
+  const kbDoc = /^kbdoc_(\d+)$/.exec(payload);
+  if (kbDoc) {
+    await openKbDocById(ctx, Number(kbDoc[1]), ctx.role);
+    return;
+  }
   // The persistent quick keyboard was removed; clear it from existing clients once, then menu.
   await ctx.reply('Вітаю! Керування — кнопкою «Menu» біля поля вводу або в меню нижче.', {
     reply_markup: { remove_keyboard: true },
@@ -181,6 +188,7 @@ bot.command('files', openFilesMenu);
 bot.command('prompt', openPromptMenu);
 bot.command('report', runReport);
 bot.command('roles', openRolesMenu);
+bot.command('settings', openSettings);
 bot.command('myreport', openMyReport);
 
 // --- Inline callbacks ----------------------------------------------------------------------
@@ -201,9 +209,11 @@ registerArchive(bot);
 registerKnowledgeBase(bot, kbState);
 registerPrompt(bot);
 registerRoles(bot);
+registerSettings(bot);
 
-// A manager saving their own phone number (request_users doesn't return a phone). Runs after
-// roles.js's contact handler, which passes non-add contacts through via next().
+// A manager saving their own phone number (request_users doesn't return a phone). Last in the
+// contact chain — the roles.js and settings.js contact handlers pass non-add contacts through via
+// next() until they reach here.
 bot.on('message:contact', async (ctx) => {
   const st = ctx.session.awaiting;
   if (st?.type !== 'save_phone') return;
@@ -235,6 +245,11 @@ bot.on('message:text', async (ctx) => {
     return;
   }
 
+  if (st?.type === 'settings_add') {
+    await addRecipientByIdText(ctx, st.kind);
+    return;
+  }
+
   if (st?.type === 'save_phone') {
     await ctx.reply('Скористайтеся кнопкою «📱 Поділитися моїм номером» нижче, або « Скасувати.');
     return;
@@ -263,10 +278,11 @@ bot.on('message:text', async (ctx) => {
         ctx.api,
         ctx.chat.id,
         'typing',
-        () => answerQuestion(ctx.message.text),
+        () => answerQuestion(ctx.message.text, ctx.role, ctx.me?.username),
         { notice: '⏳ Бот обробляє запит, це може зайняти деякий час…' }
       );
-      await sendLong(ctx.api, ctx.chat.id, answer);
+      // HTML so the source filenames render as clickable deep-links (Markdown breaks on "_" in names).
+      await sendLong(ctx.api, ctx.chat.id, answer, { parseMode: 'HTML' });
     } catch (err) {
       console.error(`[bot] KB answer failed: ${err.message}`);
       await ctx.reply(`❌ Не вдалося відповісти: ${err.message}`);
@@ -306,11 +322,9 @@ async function main() {
     .setChatMenuButton({ menu_button: { type: 'commands' } })
     .catch((e) => console.error(`[bot] setChatMenuButton failed: ${e.message}`));
 
-  if (REPORT_CHAT_ID) {
-    startScheduler(bot.api, REPORT_CHAT_ID);
-  } else {
-    console.warn('[bot] no BOT_REPORT_CHAT_ID / TELEGRAM_CHAT_ID set - scheduled reports are OFF until configured');
-  }
+  // Recipients for the auto-reports are managed in-bot (/settings → "Щоденні звіти"), read from
+  // the DB on each slot — so the scheduler always runs and needs no env chat.
+  startScheduler(bot.api);
 
   await bot.start({
     onStart: (info) => console.log(`[bot] @${info.username} started (long polling)`),
