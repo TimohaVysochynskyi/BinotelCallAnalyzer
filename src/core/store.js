@@ -52,6 +52,11 @@ async function migrate() {
     ALTER TABLE calls ADD COLUMN IF NOT EXISTS segments JSONB;
     ALTER TABLE calls ADD COLUMN IF NOT EXISTS behaviors JSONB;
     ALTER TABLE calls ADD COLUMN IF NOT EXISTS analysis_version INTEGER;
+    -- call_purpose: 'sales' | 'info' | 'other' (decided by the per-call MAP). Only 'sales' calls
+    -- feed the sales-effectiveness findings; the report shows a sales-vs-info numeric breakdown and
+    -- computes conversion over sales calls only. NULL for rows not yet (re)analysed → treated as
+    -- sales-relevant for backward-compat until the analysis backfill fills them.
+    ALTER TABLE calls ADD COLUMN IF NOT EXISTS call_purpose TEXT;
 
     CREATE TABLE IF NOT EXISTS pending_calls (
       general_call_id TEXT PRIMARY KEY,
@@ -233,8 +238,8 @@ const jsonParam = (v) => (v == null ? null : JSON.stringify(v));
 
 async function saveCall(call) {
   await pool.query(
-    `INSERT INTO calls (general_call_id, internal_number, manager_name, start_time, duration_sec, transcript, is_success, weakest_stage, communication_score, segments, behaviors, analysis_version)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12)
+    `INSERT INTO calls (general_call_id, internal_number, manager_name, start_time, duration_sec, transcript, is_success, weakest_stage, communication_score, segments, behaviors, analysis_version, call_purpose)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12, $13)
      ON CONFLICT (general_call_id) DO NOTHING`,
     [
       call.generalCallId,
@@ -249,20 +254,21 @@ async function saveCall(call) {
       jsonParam(call.segments),
       jsonParam(call.behaviors),
       call.analysisVersion ?? null,
+      call.callPurpose ?? null,
     ]
   );
   await pool.query('DELETE FROM pending_calls WHERE general_call_id = $1', [call.generalCallId]);
 }
 
 // Backfill / re-map: overwrite the analysis artifacts of an existing call (transcript + segments +
-// per-call behaviors) without touching its classification or attribution. Used by the analysis
-// backfill script (src/scripts/backfillAnalysis.js).
-async function updateCallAnalysis(generalCallId, { transcript, segments, behaviors, analysisVersion }) {
+// per-call behaviors + call_purpose) without touching its classification or attribution. Used by the
+// analysis backfill script (src/scripts/backfillAnalysis.js).
+async function updateCallAnalysis(generalCallId, { transcript, segments, behaviors, analysisVersion, callPurpose }) {
   await pool.query(
     `UPDATE calls SET transcript = COALESCE($2, transcript),
-       segments = $3::jsonb, behaviors = $4::jsonb, analysis_version = $5
+       segments = $3::jsonb, behaviors = $4::jsonb, analysis_version = $5, call_purpose = $6
      WHERE general_call_id = $1`,
-    [generalCallId, transcript ?? null, jsonParam(segments), jsonParam(behaviors), analysisVersion ?? null]
+    [generalCallId, transcript ?? null, jsonParam(segments), jsonParam(behaviors), analysisVersion ?? null, callPurpose ?? null]
   );
 }
 
@@ -292,13 +298,20 @@ async function getOperators() {
   return rows;
 }
 
+// Numeric block for the report/stats. Sales-relevant = call_purpose 'sales' OR NULL (NULL = not yet
+// analysed → counted as sales for backward-compat). Conversion, avg score and the weakest stage are
+// computed over SALES-relevant calls only, so routine informational calls don't drag the numbers.
+// callCount is the total; salesCount/infoCount give the breakdown shown in the header.
+const SALES_FILTER = `call_purpose IS DISTINCT FROM 'info' AND call_purpose IS DISTINCT FROM 'other'`;
 async function getOperatorStats(name, start, end) {
   const { rows } = await pool.query(
     `SELECT
        COUNT(*)::int AS "callCount",
-       COUNT(*) FILTER (WHERE is_success)::int AS "successCount",
-       ROUND(AVG(communication_score)::numeric, 1) AS "avgScore",
-       MODE() WITHIN GROUP (ORDER BY weakest_stage) AS "topWeakStage"
+       COUNT(*) FILTER (WHERE ${SALES_FILTER})::int AS "salesCount",
+       COUNT(*) FILTER (WHERE call_purpose IN ('info','other'))::int AS "infoCount",
+       COUNT(*) FILTER (WHERE is_success AND ${SALES_FILTER})::int AS "successCount",
+       ROUND(AVG(communication_score) FILTER (WHERE ${SALES_FILTER})::numeric, 1) AS "avgScore",
+       MODE() WITHIN GROUP (ORDER BY weakest_stage) FILTER (WHERE ${SALES_FILTER}) AS "topWeakStage"
      FROM calls
      WHERE manager_name = $1 AND start_time >= $2 AND start_time < $3
        AND transcript IS NOT NULL AND transcript <> ''`,
@@ -336,10 +349,22 @@ async function listOperatorCalls(name, start, end, limit, offset) {
 async function getRecentCallsForOperator(name, limit = 5) {
   const { rows } = await pool.query(
     `SELECT general_call_id AS "generalCallId", start_time AS "startTime",
-            (segments IS NOT NULL) AS "hasSegments"
+            (segments IS NOT NULL) AS "hasSegments", analysis_version AS "analysisVersion"
      FROM calls WHERE manager_name = $1
      ORDER BY start_time DESC LIMIT $2`,
     [name, limit]
+  );
+  return rows;
+}
+
+// The N most recent calls overall (any operator), newest first — used by the one-off "re-run the
+// last few calls through ElevenLabs" script.
+async function getRecentCalls(limit = 7) {
+  const { rows } = await pool.query(
+    `SELECT general_call_id AS "generalCallId", start_time AS "startTime",
+            manager_name AS "managerName", internal_number AS "internalNumber"
+     FROM calls ORDER BY start_time DESC LIMIT $1`,
+    [limit]
   );
   return rows;
 }
@@ -351,7 +376,8 @@ async function getCallsForReport(name, start, end) {
   const { rows } = await pool.query(
     `SELECT general_call_id AS "generalCallId", start_time AS "startTime",
             is_success AS "isSuccess", weakest_stage AS "weakestStage",
-            communication_score AS "communicationScore", segments, behaviors
+            communication_score AS "communicationScore", call_purpose AS "callPurpose",
+            segments, behaviors
      FROM calls
      WHERE manager_name = $1 AND start_time >= $2 AND start_time < $3
        AND transcript IS NOT NULL AND transcript <> ''
@@ -684,6 +710,17 @@ async function setReportUntil(date) {
 // array means "no scheduled reports". report.js reads this on every scheduler tick.
 const DEFAULT_REPORT_TIMES = ['13:00', '19:30'];
 
+// Dedup state for the ElevenLabs low-balance alert: 'ok' | 'low' | 'no_permission'. The ingest
+// checks the balance each run but only alerts when the state CHANGES (so it fires once on crossing
+// into low / on a permission problem, and re-arms when the balance recovers).
+async function getElevenLabsBalanceState() {
+  return getState('elevenlabs_balance_state');
+}
+
+async function setElevenLabsBalanceState(state) {
+  await setState('elevenlabs_balance_state', state);
+}
+
 async function getReportTimes() {
   const raw = await getState('report_times');
   if (raw == null) return [...DEFAULT_REPORT_TIMES];
@@ -718,6 +755,7 @@ export {
   getOperators,
   getOperatorStats,
   getCallsForReport,
+  getRecentCalls,
   getRecentCallsForOperator,
   updateCallTranscript,
   updateCallAnalysis,
@@ -751,6 +789,8 @@ export {
   getReportTimes,
   addReportTime,
   removeReportTime,
+  getElevenLabsBalanceState,
+  setElevenLabsBalanceState,
   getStoredAnalyzePrompt,
   setStoredAnalyzePrompt,
   clearStoredAnalyzePrompt,

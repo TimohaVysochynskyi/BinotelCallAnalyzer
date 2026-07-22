@@ -35,16 +35,23 @@ function coverage(quoteTokens, segTokenSet) {
   return hit / new Set(quoteTokens).size;
 }
 
-// segments: [{role, text, start, end}]. preferRole: try segments of this role first (quotes are
-// usually manager lines), then fall back to all. Returns the best match or null.
-function findQuote(segments, quote, { preferRole = 'manager' } = {}) {
+// segments: [{role, text, start, end}].
+//   requireRole: consider ONLY segments of this role — a quote not found in a manager turn is
+//     rejected (null). Used for manager-behaviour evidence so a client's line can't be mislabelled
+//     as the manager's. Takes precedence over preferRole.
+//   preferRole: (legacy) try this role's segments first, then the rest.
+// Returns the best match or null.
+function findQuote(segments, quote, { preferRole = 'manager', requireRole = null } = {}) {
   if (!Array.isArray(segments) || segments.length === 0) return null;
   const q = normalize(stripRoleLabel(quote));
   if (q.length < 3) return null;
   const qTokens = tokens(q);
 
   const order = [];
-  if (preferRole) {
+  if (requireRole) {
+    segments.forEach((s, i) => s.role === requireRole && order.push(i));
+    if (order.length === 0) return null; // no manager turns → cannot attribute to the manager
+  } else if (preferRole) {
     segments.forEach((s, i) => s.role === preferRole && order.push(i));
     segments.forEach((s, i) => s.role !== preferRole && order.push(i));
   } else {

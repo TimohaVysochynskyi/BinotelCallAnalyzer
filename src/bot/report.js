@@ -33,16 +33,20 @@ async function buildManagerEvidenceReport(name, start, end) {
   return { name, stats, findings, phrases, start, end };
 }
 
+// Numeric header. Conversion / score / weakest stage are over SALES-relevant calls; the breakdown
+// line shows how many of the total were sales vs informational so the numbers are honest.
 function headerText(report) {
   const { name, stats, start, end } = report;
-  const rate = stats.callCount ? Math.round((stats.successCount / stats.callCount) * 100) : 0;
+  const sales = stats.salesCount ?? 0;
+  const info = stats.infoCount ?? 0;
+  const rate = sales ? Math.round((stats.successCount / sales) * 100) : 0;
   return (
     `📊 *Доказовий звіт* — ${displayName(name)}\n` +
     `_${formatKyiv(start)} – ${formatKyiv(end)}_\n\n` +
-    `Дзвінків: *${stats.callCount}*\n` +
-    `Записів: *${stats.successCount}* (конверсія ${rate}%)\n` +
-    `Середній бал: *${stats.avgScore ?? '—'}*\n` +
-    `Найчастіший слабкий етап: *${stats.topWeakStage ?? '—'}*`
+    `Дзвінків: *${stats.callCount}* (продажних: ${sales}, інформаційних: ${info})\n` +
+    `Записів: *${stats.successCount}* з ${sales} продажних (${rate}%)\n` +
+    `Середній бал (продажні): *${stats.avgScore ?? '—'}*\n` +
+    `Найслабший етап (продажні): *${stats.topWeakStage ?? '—'}*`
   );
 }
 
@@ -67,7 +71,14 @@ async function deliverReport(api, chatId, report, { clips } = {}) {
   await sendLong(api, chatId, headerText(report), { parseMode: 'Markdown' });
 
   if (!report.findings.length) {
-    await sendLong(api, chatId, 'Недостатньо повторюваних патернів із щонайменше 3 доказами за цей період.');
+    const sales = report.stats.salesCount ?? 0;
+    const msg = sales === 0
+      ? '📄 За цей період продажних дзвінків не було — оцінювати продажні навички нема на чому. Вище — числові показники.'
+      : '✅ За цей період не знайдено повторюваних патернів (з ≥3 підтвердженими прикладами) — критичних системних проблем у продажах не зафіксовано. Вище — числові показники.';
+    await sendLong(api, chatId, msg);
+    if (report.phrases.length) {
+      await sendLong(api, chatId, '💬 Готові формулювання (зразки, НЕ цитати):\n\n' + report.phrases.map((p, i) => `${i + 1}. ${p}`).join('\n'));
+    }
     return;
   }
 

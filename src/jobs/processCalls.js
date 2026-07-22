@@ -75,6 +75,7 @@ async function transcribeClassifyAndSave(call, roster) {
     segments,
     behaviors,
     analysisVersion: behaviors ? ANALYSIS_VERSION : null,
+    callPurpose: behaviors?.callPurpose ?? null,
     isSuccess: classification.isSuccess,
     weakestStage: classification.weakestStage,
     communicationScore: classification.communicationScore,

@@ -113,17 +113,19 @@ function registerMyStats(bot) {
     const period = ctx.match[1];
     const { start, end, label } = periodRange(period);
     const s = await getOperatorStats(name, start, end);
-    const rate = s.callCount ? Math.round((s.successCount / s.callCount) * 100) : 0;
+    const sales = s.salesCount ?? 0;
+    const info = s.infoCount ?? 0;
+    const rate = sales ? Math.round((s.successCount / sales) * 100) : 0;
     const phone = ctx.botUser?.phone ? formatPhone(ctx.botUser.phone) : 'не збережено';
     const header =
       `📊 *Моя статистика* — ${label}\n` +
       `_${formatKyiv(start)} – ${formatKyiv(end)}_\n\n` +
       `Оператор: *${displayName(name)}*\n` +
       `Телефон: ${phone}\n\n` +
-      `Дзвінків: *${s.callCount}*\n` +
-      `Успішних: *${s.successCount}* (${rate}%)\n` +
-      `Середній бал: *${s.avgScore ?? '—'}*\n` +
-      `Найчастіший слабкий етап: *${s.topWeakStage ?? '—'}*`;
+      `Дзвінків: *${s.callCount}* (продажних: ${sales}, інформаційних: ${info})\n` +
+      `Записів: *${s.successCount}* з ${sales} продажних (${rate}%)\n` +
+      `Середній бал (продажні): *${s.avgScore ?? '—'}*\n` +
+      `Найслабший етап (продажні): *${s.topWeakStage ?? '—'}*`;
     const kb = new InlineKeyboard()
       .text('☎️ Оновити мій номер', 'me:phone')
       .row()

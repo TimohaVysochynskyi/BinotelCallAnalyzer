@@ -41,9 +41,11 @@ async function main() {
     const calls = await getRecentCallsForOperator(op.name, PER_OPERATOR);
     console.log(`[backfill] ${name} — ${calls.length} call(s):`);
     for (const c of calls) {
-      if (c.hasSegments) {
+      // Idempotent: skip only when already analysed at the CURRENT version. A stale version
+      // (e.g. before call_purpose) is re-processed so old rows get the new fields.
+      if (c.hasSegments && (c.analysisVersion ?? 0) >= ANALYSIS_VERSION) {
         skipped += 1;
-        console.log(`   • ${c.generalCallId} — already has segments, skip`);
+        console.log(`   • ${c.generalCallId} — already analysed (v${c.analysisVersion}), skip`);
         continue;
       }
       try {
@@ -65,9 +67,10 @@ async function main() {
           segments,
           behaviors,
           analysisVersion: behaviors ? ANALYSIS_VERSION : null,
+          callPurpose: behaviors?.callPurpose ?? null,
         });
         const nItems = behaviors?.items?.length ?? 0;
-        console.log(`   ✓ ${c.generalCallId} — ${segments?.length ?? 0} segments, ${nItems} behaviors`);
+        console.log(`   ✓ ${c.generalCallId} — ${segments?.length ?? 0} segments, purpose=${behaviors?.callPurpose ?? '—'}, ${nItems} behaviors`);
         done += 1;
       } catch (err) {
         console.error(`   ✗ ${c.generalCallId}: ${err.message}`);

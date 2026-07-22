@@ -91,12 +91,42 @@ const FINDINGS_SCHEMA = {
   },
 };
 
+// Second-pass relevance check: for each finding, which of its (already existence-verified) quotes
+// ACTUALLY demonstrate the claim. Kills the "quote exists but is unrelated" failure the existence
+// check alone can't catch.
+const RELEVANCE_SCHEMA = {
+  name: 'evidence_relevance',
+  strict: true,
+  schema: {
+    type: 'object',
+    properties: {
+      findings: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            index: { type: 'integer' },
+            supporting: { type: 'array', items: { type: 'integer' } },
+          },
+          required: ['index', 'supporting'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['findings'],
+    additionalProperties: false,
+  },
+};
+
 // Flatten every call's cached behaviours into a candidate pool with stable ids ("e0","e1",…). Keeps
-// the source call + timecode so verification/audio can resolve back to the exact spot.
+// the source call + timecode so verification/audio can resolve back to the exact spot. Non-sales
+// calls (call_purpose 'info'/'other') are skipped entirely so a routine status update never becomes
+// a "sales mistake" finding. (NULL purpose = not yet analysed → included for backward-compat.)
 function buildCandidates(calls) {
   const candidates = [];
   const byId = new Map();
   calls.forEach((c) => {
+    if (c.callPurpose === 'info' || c.callPurpose === 'other') return;
     const items = c.behaviors?.items || [];
     items.forEach((it) => {
       if (!it?.quote) return;
@@ -131,7 +161,7 @@ function renderCandidate(c) {
 // time, so keep them (no timecode → no clip). Returns the evidence object or null.
 function verifyCandidate(c) {
   if (Array.isArray(c.segments) && c.segments.length) {
-    const hit = findQuote(c.segments, c.quote, { preferRole: 'manager' });
+    const hit = findQuote(c.segments, c.quote, { requireRole: 'manager' });
     if (!hit) return null;
     return { callId: c.callId, startTime: c.startTime, quote: c.quote, start: hit.start, end: hit.end };
   }
@@ -176,6 +206,67 @@ function assembleFindings(rawFindings, calls) {
   }
   findings.sort((a, b) => (a.type === b.type ? 0 : a.type === 'error' ? -1 : 1));
   return findings;
+}
+
+// Relevance verification (LLM). Given assembled findings (each already has >= MIN_EVIDENCE existing
+// manager quotes), ask a strict reviewer which quotes REALLY demonstrate each claim; keep only those,
+// and drop a finding that falls below MIN_EVIDENCE. On any API failure, fall back to the assembled
+// findings unchanged (don't nuke the whole report over a transient error). Pure filtering — never
+// invents or edits text.
+async function verifyFindingsRelevance(findings) {
+  if (!findings.length) return findings;
+
+  const payload = findings.map((f, fi) => ({
+    index: fi,
+    type: f.type,
+    claim: f.claim,
+    evidence: f.evidence.map((e, ei) => ({ i: ei, quote: e.quote })),
+  }));
+
+  const system =
+    `Ти суворий рецензент доказів у звіті про роботу менеджера автосервісу. Для КОЖНОГО finding дано ` +
+    `твердження (claim) і пронумеровані цитати з реплік менеджера.\n` +
+    `Визнач, які цитати САМІ ПО СОБІ доводять саме це твердження. Цитата, що нейтральна, загальна, ` +
+    `не про те, або лише побічно стосується, — НЕ підтверджує (не включай її).\n` +
+    `Будь суворим: краще менше, ніж притягнуте за вуха. Поверни для кожного finding його index і ` +
+    `масив "supporting" — індекси (i) цитат, що справді підтверджують claim.`;
+
+  let out;
+  try {
+    out = await withRetry(
+      async () => {
+        const res = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: reduceModel(),
+            messages: [
+              { role: 'system', content: system },
+              { role: 'user', content: JSON.stringify(payload) },
+            ],
+            response_format: { type: 'json_schema', json_schema: RELEVANCE_SCHEMA },
+          }),
+        });
+        if (!res.ok) throw new Error(`OpenAI relevance verify failed: ${res.status} ${await res.text()}`);
+        return JSON.parse((await res.json()).choices[0].message.content);
+      },
+      { attempts: 2, delayMs: 1500, label: 'OpenAI relevance verify' }
+    );
+  } catch (err) {
+    console.error(`[analyze] relevance verify failed, keeping assembled findings: ${err.message}`);
+    return findings;
+  }
+
+  const supMap = new Map((out.findings || []).map((r) => [r.index, new Set(r.supporting || [])]));
+  const kept = [];
+  findings.forEach((f, fi) => {
+    const sup = supMap.get(fi);
+    if (!sup) return; // finding the reviewer didn't confirm → drop (strict)
+    const evidence = f.evidence.filter((_, ei) => sup.has(ei));
+    if (evidence.length < MIN_EVIDENCE) return;
+    kept.push({ ...f, evidence });
+  });
+  return kept;
 }
 
 // calls: rows from store.getCallsForReport (with cached behaviors + segments). stats: numeric block
@@ -225,8 +316,10 @@ async function reduceFindings(managerName, calls, stats) {
     { attempts: 2, delayMs: 2000, label: `OpenAI reduce ${managerName}` }
   );
 
-  // Code-enforced evidence rules (pure, testable) — the anti-fabrication / anti-dup guarantee.
-  const findings = assembleFindings(raw.findings, calls);
+  // Code-enforced evidence rules (pure, testable) — anti-fabrication / anti-dup / manager-role.
+  const assembled = assembleFindings(raw.findings, calls);
+  // Then an LLM relevance pass — drop quotes that don't actually demonstrate the claim.
+  const findings = await verifyFindingsRelevance(assembled);
   const phrases = (raw.recommended_phrases || []).map((p) => String(p).trim()).filter(Boolean);
   return { findings, phrases };
 }

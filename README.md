@@ -4,7 +4,7 @@
 
 1. Бере нові дзвінки з Binotel з моменту останнього успішного запуску (чекпоінт, не фіксоване вікно)
 2. Транскрибує запис через ElevenLabs (STT + розділення мовців в одному виклику) → зберігає готовий діалог **+ таймкоди реплік** (`calls.segments`, для аудіо-фрагментів у звіті); fallback — OpenAI, якщо ElevenLabs недоступний
-3. Класифікує дзвінок (успішність / найслабший етап / оцінка 1–10) і робить **per-call аналіз поведінок** (`calls.behaviors`, кеш для доказового звіту)
+3. Класифікує дзвінок (успішність / найслабший етап / оцінка 1–10) і робить **per-call аналіз поведінок** (`calls.behaviors` + тип дзвінка `call_purpose`: продажний/інформаційний — непродажні не потрапляють у findings; кеш для доказового звіту)
 4. Визначає, **якому менеджеру** належить дзвінок, і зберігає все в Postgres
 
 Звітності, PDF і Google Sheets у самому інжесті **немає свідомо** — це чистий збір даних. Звіти (тепер **доказові**: findings з реальними цитатами + аудіо-фрагменти), статистика й доступ до дзвінків — окремий Telegram-бот (`src/bot/`, `npm run bot`), що читає ту саму БД. Деталі бота — [`src/bot/README.md`](src/bot/README.md).
@@ -15,7 +15,7 @@
 
 ```
 src/
-  core/     — спільне ядро (store, binotel, transcribe, elevenlabs, classifyCall, analyzeCall, quoteMatch, identifyManager, telegram, retry)
+  core/     — спільне ядро (store, binotel, transcribe, elevenlabs, audioMeta, classifyCall, analyzeCall, quoteMatch, identifyManager, telegram, retry)
   jobs/     — задеплоєний cron-джоб інжесту (index.js + pollNewCalls + processCalls)
   scripts/  — одноразові тули (backfill, testSingleCall, reattributeShared, retranscribeRecent, backfillAnalysis)
   bot/      — Telegram-бот звітності (grammy, окремий токен): доказові звіти (текст+аудіо), статистика, архів розмов
@@ -50,6 +50,7 @@ src/
 `sendAlert()` (`src/core/telegram.js`) шле алерти у випадках:
 - джоба впала з необробленою помилкою
 - дзвінок у `pending_calls` вичерпав ліміт спроб
+- **низький баланс ElevenLabs** (`< ELEVENLABS_MIN_BALANCE_USD`, дефолт $2) — перевіряється щопо-поллінгу, алерт при перетині порогу; потребує права `user_read` на ключі
 
 Отримувачі алертів більше не в env — це список у БД (`app_state.alert_recipients`), яким керує директор у боті: `/settings` → «Сповіщення про поломки». Можна кількох одразу. Нема отримувачів → алерт лише в лог (не губиться). Алерти йдуть через той самий єдиний бот `@OBVCarServiceWork_bot` (вихідні виклики не конфліктують з `getUpdates` бота звітності).
 
@@ -65,6 +66,7 @@ npm run test:call -- <generalCallID>      # смок-тест транскрип
 npm run backfill -- "2026-07-01 00:00:00" "2026-07-03 23:59:59"   # історичний період
 npm run reattribute:shared               # переприв'язати старі 901/902 до людей (AI)
 npm run retranscribe:recent              # одноразово: останні 5 дзвінків кожного менеджера+Богдан → ElevenLabs (діаризація)
+npm run retranscribe:last                # одноразово: останні 7 дзвінків глобально ФОРСОВАНО через ElevenLabs (після періоду без коштів → OpenAI-фолбек)
 npm run backfill:analysis                # одноразово: останні 30/людину → таймкоди (segments) + per-call аналіз (behaviors) для доказового звіту
 ```
 

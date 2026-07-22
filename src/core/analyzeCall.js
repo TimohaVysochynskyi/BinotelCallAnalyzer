@@ -10,7 +10,7 @@ import { findQuote } from './quoteMatch.js';
 // (findQuote): a quote that can't be located is dropped (guards against fabrication/paraphrase), and
 // a located quote gets its {start,end} so the report can later cut an audio clip around it.
 
-const ANALYSIS_VERSION = 1;
+const ANALYSIS_VERSION = 2;
 const MAX_ITEMS = 8; // bound noise/cost; the reduce only needs recurring patterns, not everything
 const model = () => process.env.OPENAI_ANALYZE_MODEL || 'gpt-4o-mini';
 
@@ -24,18 +24,29 @@ const BEHAVIOR_STAGES = [
   'інше',
 ];
 
-const SYSTEM_PROMPT = `Контекст: менеджер автосервісу (СТО) веде телефонну розмову. Успіх = клієнт записаний на сервіс або підтвердив дату приїзду.
+// Purpose of the call, decided first. Only 'sales' calls feed the sales-effectiveness report;
+// 'info'/'other' calls contribute NO behaviours (so a routine status update never becomes a
+// "sales mistake"). The purpose is also stored per call (calls.call_purpose) for the report's
+// sales-vs-info numeric breakdown.
+const CALL_PURPOSES = ['sales', 'info', 'other'];
 
-Твоє завдання: виділити КОНКРЕТНІ поведінки САМЕ МЕНЕДЖЕРА в цьому одному дзвінку — і сильні, і слабкі — та підкріпити кожну ДОСЛІВНОЮ цитатою рядка менеджера.
+const SYSTEM_PROMPT = `Контекст: менеджер автосервісу (СТО) веде телефонну розмову.
 
-Суворі правила:
-- Аналізуй лише репліки менеджера (не клієнта).
-- Кожна поведінка МУСИТЬ мати "quote" — це рівно один рядок менеджера, СКОПІЙОВАНИЙ ДОСЛІВНО з транскрипту (той самий текст, без переказу, без перекладу, без виправлень). Якщо дослівної цитати немає — не додавай поведінку.
-- type: "strength" (сильна) або "error" (слабка/помилка).
-- label: коротка назва поведінки (3-6 слів), напр. "Не запропонував конкретну дату" або "Чітко назвав ціну".
-- stage: етап розмови зі списку.
-- Не вигадуй. Краще менше пунктів, але з реальними цитатами. Для тривіального дзвінка (просте підтвердження) поведінок може бути 0-1.
-- Не більше 8 поведінок.`;
+КРОК 1 — визнач ТИП дзвінка (callPurpose):
+- "sales" — Є можливість залучити/записати клієнта чи продати: вхідний запит про послугу/ціну, новий клієнт із проблемою авто, заперечення, допродаж, спроба записати на сервіс.
+- "info" — НЕМАЄ продажної можливості: менеджер лише інформує про статус уже наявного замовлення ("машина готова", "буде готово завтра", "вартість вийшла така"), підтверджує вже наявний запис, або клієнт дзвонить уточнити статус своєї машини. Звичайна сервісна/інформаційна розмова.
+- "other" — службовий/помилковий/спам/не по темі.
+
+КРОК 2 — поведінки менеджера (items):
+- Якщо callPurpose НЕ "sales" → поверни items ПОРОЖНІМ. Не оцінюй продажні навички на інформаційному дзвінку.
+- Якщо "sales" → виділи КОНКРЕТНІ поведінки САМЕ МЕНЕДЖЕРА (сильні й слабкі), кожну з ДОСЛІВНОЮ цитатою.
+
+Суворі правила для items (лише для sales-дзвінків):
+- Аналізуй ЛИШЕ репліки менеджера (не клієнта).
+- "quote" = рівно один рядок МЕНЕДЖЕРА, СКОПІЙОВАНИЙ ДОСЛІВНО (той самий текст, без переказу/перекладу/виправлень).
+- Цитата має САМА ПО СОБІ демонструвати цю поведінку. Якщо рядок нейтральний, загальний або лише побічно стосується — НЕ додавай його. Краще 0 поведінок, ніж притягнута за вуха.
+- type: "strength" або "error". label: коротка назва (3-6 слів). stage: етап зі списку.
+- Не вигадуй. Не більше 8 поведінок. Для короткого/тривіального дзвінка їх може бути 0.`;
 
 const SCHEMA = {
   name: 'call_behaviors',
@@ -43,6 +54,7 @@ const SCHEMA = {
   schema: {
     type: 'object',
     properties: {
+      callPurpose: { type: 'string', enum: CALL_PURPOSES },
       items: {
         type: 'array',
         items: {
@@ -58,7 +70,7 @@ const SCHEMA = {
         },
       },
     },
-    required: ['items'],
+    required: ['callPurpose', 'items'],
     additionalProperties: false,
   },
 };
@@ -78,12 +90,14 @@ function pseudoSegments(transcript) {
   return out;
 }
 
-// Returns the behaviors object to store: { version, items:[{type,stage,label,quote,start,end,segIndex}] }.
-// segments (from ElevenLabs) carry timecodes; when null we verify against the transcript instead
-// (items kept, but start/end stay null so no audio clip is produced for them).
+// Returns { version, callPurpose, items:[{type,stage,label,quote,start,end,segIndex}] }.
+// callPurpose gates everything: only 'sales' calls get behaviours (info/other → items:[]). segments
+// (from ElevenLabs) carry timecodes; when null we verify against the transcript instead (items kept,
+// but start/end stay null so no audio clip is produced). A quote is accepted ONLY if it's found in a
+// MANAGER segment (requireRole) — a client line can't be mislabelled as a manager behaviour.
 async function analyzeCallBehaviors(transcript, segments, managerName) {
   const verifySegments = Array.isArray(segments) && segments.length ? segments : pseudoSegments(transcript);
-  if (!transcript || !verifySegments.length) return { version: ANALYSIS_VERSION, items: [] };
+  if (!transcript || !verifySegments.length) return { version: ANALYSIS_VERSION, callPurpose: 'other', items: [] };
 
   const raw = await withRetry(
     async () => {
@@ -108,12 +122,16 @@ async function analyzeCallBehaviors(transcript, segments, managerName) {
     { attempts: 2, delayMs: 1500, label: 'OpenAI call behaviors' }
   );
 
+  const callPurpose = CALL_PURPOSES.includes(raw.callPurpose) ? raw.callPurpose : 'other';
+  // Non-sales calls contribute no behaviours to the sales-effectiveness report.
+  if (callPurpose !== 'sales') return { version: ANALYSIS_VERSION, callPurpose, items: [] };
+
   const items = [];
   for (const it of (raw.items || []).slice(0, MAX_ITEMS)) {
     if (!it?.quote) continue;
-    // Verify the quote is really in the call; drop it otherwise (anti-fabrication). Located quotes
-    // carry their timecode for later audio clipping.
-    const hit = findQuote(verifySegments, it.quote, { preferRole: 'manager' });
+    // Accept only if the quote is a real MANAGER line (anti-fabrication + anti-misattribution).
+    // A located quote carries its timecode for later audio clipping.
+    const hit = findQuote(verifySegments, it.quote, { requireRole: 'manager' });
     if (!hit) continue;
     items.push({
       type: it.type === 'strength' ? 'strength' : 'error',
@@ -125,7 +143,7 @@ async function analyzeCallBehaviors(transcript, segments, managerName) {
       segIndex: hit.segIndex,
     });
   }
-  return { version: ANALYSIS_VERSION, items };
+  return { version: ANALYSIS_VERSION, callPurpose, items };
 }
 
-export { analyzeCallBehaviors, ANALYSIS_VERSION, BEHAVIOR_STAGES };
+export { analyzeCallBehaviors, ANALYSIS_VERSION, BEHAVIOR_STAGES, CALL_PURPOSES };

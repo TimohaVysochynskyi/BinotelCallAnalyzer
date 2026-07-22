@@ -62,10 +62,13 @@ OPENAI_ANALYZE_MODEL=gpt-4o-mini  # classification + per-call behavior MAP
 OPENAI_REPORT_MODEL=gpt-4o        # report REDUCE (aggregation into findings); rare, so a stronger tier
 OPENAI_EMBED_MODEL=text-embedding-3-small
 CALL_LANGUAGE=
-ELEVENLABS_API_KEY=...            # primary transcriber (STT + diarization + timecodes); empty = OpenAI fallback
+ELEVENLABS_API_KEY=...            # primary transcriber (STT + diarization/multichannel + timecodes); empty = OpenAI fallback
 ELEVENLABS_STT_MODEL=scribe_v1
 ELEVENLABS_NUM_SPEAKERS=2
+ELEVENLABS_MIN_BALANCE_USD=2      # low-balance alert threshold (needs `user_read` permission on the key)
+ELEVENLABS_USD_PER_1000_CREDITS=0.22  # credits→USD estimate; calibrate to your ElevenLabs dashboard
 FFMPEG_PATH=ffmpeg                # audio-clip cutter for the evidence report (see Крок 1)
+FFPROBE_PATH=ffprobe              # stereo/mono detection for multichannel STT (ships with ffmpeg)
 AUDIO_CLIP_PAD_SEC=3
 BACKFILL_LIMIT=30
 JOB_TYPE=poll
@@ -78,6 +81,10 @@ OPERATOR_ALIASES=
 ```
 
 > Куди слати алерти/звіти ТА о котрій — більше НЕ в env, а в БД, кероване в боті: `/settings` → «Сповіщення про поломки» / «Щоденні звіти» / «Час звітів». На чистій БД списки отримувачів порожні; після старту зайдіть у бот і додайте їх (для групи-алертів — опція «числовий ID чату»). Час звітів до редагування = дефолт 13:00/19:30. Прибрані env-змінні: `TELEGRAM_CHAT_ID`, `BOT_REPORT_CHAT_ID`, `BOT_REPORT_TIMES`. `BOT_ALLOWED_CHAT_IDS` → `TELEGRAM_BOOTSTRAP_CHAT_IDS`.
+
+> **Алерт про низький баланс ElevenLabs** іде тим самим отримувачам «Сповіщення про поломки». Щоб він працював, у самому ElevenLabs дай API-ключу дозвіл **`user_read`** (Developers → API Keys → права ключа), інакше бот один раз попередить, що не може читати баланс. Поріг — `ELEVENLABS_MIN_BALANCE_USD` (дефолт $2); долар оцінюється з кредитів за `ELEVENLABS_USD_PER_1000_CREDITS` — підкрутіть під суму, яку показує ваш дашборд.
+
+> Якщо був період без коштів на ElevenLabs (дзвінки пішли через OpenAI, без діаризації/таймкодів) — після поповнення прожени `npm run retranscribe:last` (останні 7 дзвінків форсовано через ElevenLabs).
 
 Транскрипція йде через **ElevenLabs STT (Scribe)** — транскрипція + розділення мовців в одному виклику, готовий діалог зберігається одразу. Для ~50 дзвінків/день потрібен план **Scale** (~$330/міс; STT = 330 кредитів/хв). Без `ELEVENLABS_API_KEY` (або якщо API впав) — автоматичний fallback на OpenAI-транскрипцію (без розділення мовців), дзвінок не губиться.
 

@@ -1,17 +1,24 @@
 import { withRetry } from './retry.js';
+import { probeChannels } from './audioMeta.js';
 
-// ElevenLabs Speech-to-Text (Scribe): transcription + speaker diarization in ONE request.
+// ElevenLabs Speech-to-Text (Scribe): transcription + speaker separation in ONE request.
 // Endpoint: POST https://api.elevenlabs.io/v1/speech-to-text (auth header: xi-api-key).
 // We build a ready-to-store "Менеджер:/Клієнт:" dialogue right here at ingest, so the archive can
-// show it instantly with no extra request. Who is the manager vs the client isn't known from
-// diarization (it only gives speaker_0/speaker_1), so a cheap LLM call maps speaker -> role;
-// if that fails we fall back to the heuristic "first speaker = manager".
+// show it instantly with no extra request.
+//   • STEREO calls (2 channels) → multichannel mode: each channel is one party, so speaker
+//     separation is PERFECT and comes straight from ElevenLabs (use_multi_channel=true, diarize
+//     off, combined output → words carry speaker_id/channel_index). Role (manager vs client) is
+//     then picked on cleanly-separated text → far more reliable than content-only diarization.
+//   • MONO calls → content-based diarization (diarize=true), same as before.
+// Who is the manager vs the client still isn't given by ElevenLabs, so pickManagerSpeaker decides.
 const STT_URL = 'https://api.elevenlabs.io/v1/speech-to-text';
+const SUBSCRIPTION_URL = 'https://api.elevenlabs.io/v1/user/subscription';
 const sttModel = () => process.env.ELEVENLABS_STT_MODEL || 'scribe_v1';
 const numSpeakers = () => process.env.ELEVENLABS_NUM_SPEAKERS || '2'; // phone call = 2 parties
 
-// Raw STT call. Returns the ElevenLabs JSON ({ text, words:[{text,type,speaker_id,...}], ... }).
-async function sttDiarize(audioBlob) {
+// Raw STT call. Returns the ElevenLabs JSON ({ text, words:[{text,type,speaker_id,channel_index,...}] }).
+// multichannel=true switches to per-channel speaker separation (for stereo recordings).
+async function sttDiarize(audioBlob, { multichannel = false } = {}) {
   const key = process.env.ELEVENLABS_API_KEY;
   if (!key) throw new Error('ELEVENLABS_API_KEY is not set');
   return withRetry(
@@ -19,8 +26,16 @@ async function sttDiarize(audioBlob) {
       const form = new FormData();
       form.append('file', audioBlob, 'call.mp3');
       form.append('model_id', sttModel());
-      form.append('diarize', 'true');
-      form.append('num_speakers', numSpeakers());
+      if (multichannel) {
+        // Each channel = one speaker; diarization must be OFF in this mode. "combined" returns a
+        // single words[] sorted by start time, each word tagged with its channel (speaker_id).
+        form.append('use_multi_channel', 'true');
+        form.append('diarize', 'false');
+        form.append('multichannel_output_style', 'combined');
+      } else {
+        form.append('diarize', 'true');
+        form.append('num_speakers', numSpeakers());
+      }
       // CALL_LANGUAGE (uk/ru) forces the language; otherwise Scribe auto-detects (uk & ru are both
       // "excellent accuracy"), which also removes the old OpenAI uk-vs-ru re-transcription dance.
       if (process.env.CALL_LANGUAGE) form.append('language_code', process.env.CALL_LANGUAGE);
@@ -37,6 +52,29 @@ async function sttDiarize(audioBlob) {
   );
 }
 
+// Remaining ElevenLabs balance (credits). The subscription endpoint returns character_count /
+// character_limit (unified credits) — remaining = limit - count. Needs the API key to have the
+// `user_read` permission; without it the endpoint 401s (reason 'missing_permission'), which the
+// caller surfaces so the owner can grant it. Best-effort: never throws.
+async function getElevenLabsBalance() {
+  const key = process.env.ELEVENLABS_API_KEY;
+  if (!key) return { ok: false, reason: 'no_key' };
+  try {
+    const res = await fetch(SUBSCRIPTION_URL, { headers: { 'xi-api-key': key } });
+    if (res.status === 401) {
+      const body = await res.text();
+      return { ok: false, reason: /missing_permission|user_read/i.test(body) ? 'missing_permission' : 'unauthorized' };
+    }
+    if (!res.ok) return { ok: false, reason: `http_${res.status}` };
+    const data = await res.json();
+    const used = Number(data.character_count ?? 0);
+    const limit = Number(data.character_limit ?? 0);
+    return { ok: true, used, limit, remainingCredits: Math.max(0, limit - used), tier: data.tier, currency: data.currency };
+  } catch (err) {
+    return { ok: false, reason: 'error', error: err.message };
+  }
+}
+
 // Group the flat words[] into speaker turns, KEEPING each turn's timecode (start of its first word,
 // end of its last) — the report needs these to cut an audio clip around a quoted line. 'spacing'
 // tokens carry the whitespace and have no speaker of their own, so they just extend the current
@@ -50,7 +88,9 @@ function buildTurns(words) {
       if (cur) cur.text += t;
       continue;
     }
-    const sid = w.speaker_id ?? (cur ? cur.speaker : 'speaker_0');
+    const sid =
+      w.speaker_id ??
+      (w.channel_index != null ? `speaker_${w.channel_index}` : cur ? cur.speaker : 'speaker_0');
     if (!cur || cur.speaker !== sid) {
       if (cur) turns.push(cur);
       cur = { speaker: sid, text: t, start: w.start ?? null, end: w.end ?? null };
@@ -211,7 +251,11 @@ async function pickManagerSpeaker(turns, speakerIds, managerName) {
 //               clipping, or null when there's nothing to diarize (voicemail / single speaker).
 // managerName (when known from Binotel) anchors role detection on our specific employee.
 async function transcribeDiarized(audioBlob, managerName) {
-  const data = await sttDiarize(audioBlob);
+  // Stereo → per-channel separation (much better roles); mono → content diarization.
+  const channels = await probeChannels(audioBlob);
+  const multichannel = (channels ?? 1) >= 2;
+  if (multichannel) console.log(`[elevenlabs] ${channels}-channel audio → multichannel STT (per-channel speakers)`);
+  const data = await sttDiarize(audioBlob, { multichannel });
   const plain = (data.text || '').trim();
   const turns = buildTurns(data.words);
   if (turns.length === 0) return { transcript: plain || '(порожньо)', segments: null };
@@ -229,4 +273,4 @@ async function transcribeDiarized(audioBlob, managerName) {
   return { transcript, segments };
 }
 
-export { transcribeDiarized, sttDiarize, buildTurns, heuristicManager };
+export { transcribeDiarized, sttDiarize, buildTurns, heuristicManager, getElevenLabsBalance };
