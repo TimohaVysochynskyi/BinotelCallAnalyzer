@@ -84,7 +84,7 @@ async function detectLanguages(text) {
   );
 }
 
-async function transcribeAudio(audioUrl) {
+async function transcribeAudio(audioUrl, { managerName } = {}) {
   const audioBlob = await withRetry(
     async () => {
       console.log(`[transcribe] downloading recording from ${audioUrl}`);
@@ -101,7 +101,7 @@ async function transcribeAudio(audioUrl) {
   // it fails (no key / API error / quota), fall through to the OpenAI path below so no call is lost.
   if (process.env.ELEVENLABS_API_KEY) {
     try {
-      const dialogue = await transcribeDiarized(audioBlob);
+      const dialogue = await transcribeDiarized(audioBlob, managerName);
       console.log(`[transcribe] ElevenLabs OK — ${dialogue.length} chars (diarized)`);
       return dialogue;
     } catch (err) {

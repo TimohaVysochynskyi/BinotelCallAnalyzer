@@ -48,7 +48,9 @@ async function resolveManagerName(call, transcript, roster) {
 // exactly once, right when the transcript first becomes available.
 async function transcribeClassifyAndSave(call, roster) {
   const recordUrl = await getCallRecordUrl(call.generalCallId);
-  const transcript = await transcribeAudio(recordUrl);
+  // employeeName (Binotel, personal extensions) anchors speaker-role detection on our actual
+  // employee. Null for shared handsets — role detection falls back to operator-role heuristics.
+  const transcript = await transcribeAudio(recordUrl, { managerName: call.employeeName });
   const classification = await classifyCall(transcript);
   const managerName = await resolveManagerName(call, transcript, roster);
 

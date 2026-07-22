@@ -41,7 +41,9 @@ async function main() {
       try {
         const url = await getCallRecordUrl(c.generalCallId);
         if (!url) throw new Error('no record URL from Binotel');
-        const transcript = await transcribeAudio(url);
+        // Pass the operator's display name so speaker-role detection anchors on OUR employee
+        // (e.g. picks the speaker who says "це Андрій"), not on "who plays the service operator".
+        const transcript = await transcribeAudio(url, { managerName: displayName(op.name) });
         await updateCallTranscript(c.generalCallId, transcript);
         console.log(`   ✓ ${c.generalCallId} (${c.startTime}) — ${transcript.length} chars`);
         ok += 1;

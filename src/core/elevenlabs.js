@@ -88,6 +88,26 @@ const MANAGER_MARKERS = [
   'у нас є', 'наша адреса', 'запчастин', 'запчаст',
 ];
 
+// STRONGEST signal: the manager self-introduces by their known name (e.g. "Это Андрей вас
+// беспокоит", "мене звати Андрій"). Works even when our manager is the CALLER acting like a
+// customer (an outbound call to a supplier) — the content-role heuristics fail there, this doesn't.
+// Returns the speaker id that self-introduces, or null. Exact (lowercased) match on the name — name
+// spelling variants (Андрій/Андрей) are left to the LLM.
+function selfIntroManager(turns, speakerIds, managerName) {
+  const n = String(managerName || '').trim().toLowerCase();
+  if (n.length < 3) return null;
+  const patterns = [
+    `це ${n}`, `это ${n}`, `мене звати ${n}`, `меня зовут ${n}`, `звати ${n}`, `зовут ${n}`,
+    `${n} вас турбує`, `${n} вас беспокоит`, `${n} турбує`, `${n} беспокоит`,
+    `${n} на зв`, `${n} на связи`, `це знову ${n}`, `это снова ${n}`,
+  ];
+  for (const t of turns) {
+    const low = t.text.toLowerCase();
+    if (patterns.some((p) => low.includes(p))) return t.speaker;
+  }
+  return null;
+}
+
 // Score each speaker by how many operator-markers their lines contain; the highest = manager.
 // Returns null when nobody used any marker (no signal to decide on).
 function heuristicManager(turns, speakerIds) {
@@ -107,14 +127,22 @@ function heuristicManager(turns, speakerIds) {
   return best; // null when all scores are 0
 }
 
-// Decide which speaker id is the auto-service MANAGER. Primary: an LLM over the WHOLE dialogue with
-// a sharp bilingual prompt and explicit reasoning. Backed by the keyword heuristic — used on LLM
-// failure, on an out-of-range answer, and as a tie-breaker when the LLM is "low" confidence. Last
-// resort (no LLM, no keyword signal): first speaker.
-async function pickManagerSpeaker(turns, speakerIds) {
-  const heuristic = heuristicManager(turns, speakerIds);
+// Decide which speaker id is OUR MANAGER. The goal is to find our specific employee, NOT "whoever
+// plays the service-operator role" — on an outbound call our manager is the caller and sounds like
+// a customer, so role-based guessing flips. Layers, most-reliable first:
+//   1) self-introduction by the known manager name (deterministic) — e.g. "Это Андрей вас беспокоит";
+//   2) LLM over the WHOLE dialogue, framed as "which speaker is our employee «<name>»" when we know
+//      the name, else "who is the service operator";
+//   3) keyword heuristic (operator markers) then first speaker as last resorts.
+async function pickManagerSpeaker(turns, speakerIds, managerName) {
+  const intro = selfIntroManager(turns, speakerIds, managerName);
+  if (intro) {
+    console.log(`[elevenlabs] manager by self-introduction ("${managerName}") → ${intro}`);
+    return intro;
+  }
 
-  // Feed as much of the dialogue as fits a char budget (whole call, not just the opening).
+  const keyword = heuristicManager(turns, speakerIds);
+
   const MAX_CHARS = 8000;
   let body = '';
   for (const t of turns) {
@@ -123,16 +151,18 @@ async function pickManagerSpeaker(turns, speakerIds) {
     body += line;
   }
 
-  const system =
-    `Ти аналізуєш транскрипт телефонної розмови в автосервісі (СТО). Учасники: ${speakerIds.join(', ')}. ` +
-    `Рівно один із них — МЕНЕДЖЕР (працівник СТО), решта — КЛІЄНТ.\n` +
-    `Ознаки МЕНЕДЖЕРА: вітається від імені сервісу; питає марку/модель і проблему авто; пропонує запис, ` +
-    `називає дату/час і ціни; згадує майстра, діагностику, роботи, запчастини; каже "запишу вас", ` +
-    `"приїжджайте", "у нас", "передзвоню".\n` +
-    `Ознаки КЛІЄНТА: описує СВОЮ проблему ("у мене стукає", "моя машина"), питає ціну/чи є місце, ` +
-    `погоджується або відмовляється, дякує.\n` +
-    `Аналізуй ВЕСЬ діалог, а не лише початок — клієнт міг заговорити першим ("алло?"). ` +
-    `Поверни JSON: reasoning (1-2 речення чому), manager (рівно один id зі списку: ${speakerIds.join(', ')}), confidence.`;
+  const system = managerName
+    ? `Ти аналізуєш транскрипт телефонної розмови автосервісу (СТО). Учасники: ${speakerIds.join(', ')}. ` +
+      `Один із них — НАШ працівник на імʼя «${managerName}» (враховуй варіанти написання: Андрій/Андрей, Володимир/Владимир тощо). Визнач, ХТО з мовців — це «${managerName}».\n` +
+      `Найнадійніше — САМОПРЕДСТАВЛЕННЯ цим імʼям ("це ${managerName}", "мене звати ${managerName}", "${managerName} вас турбує/беспокоит"): тоді ЦЕЙ мовець і є наш працівник — навіть якщо він сам комусь телефонує й звучить як замовник.\n` +
+      `Якщо імені в розмові немає: наш працівник — той, хто поводиться як працівник СТО (вітає від сервісу, консультує клієнта, пропонує запис/ціни/майстра); АБО, якщо це ВИХІДНИЙ дзвінок (наш працівник сам телефонує постачальнику/іншому сервісу), наш працівник — той, хто телефонує й пояснює свою потребу, а НЕ той, хто підняв слухавку ("алло").\n` +
+      `Поверни JSON: reasoning (1-2 речення), manager (рівно один id: ${speakerIds.join(', ')}), confidence.`
+    : `Ти аналізуєш транскрипт телефонної розмови автосервісу (СТО). Учасники: ${speakerIds.join(', ')}. ` +
+      `Рівно один із них — працівник СТО (МЕНЕДЖЕР), решта — КЛІЄНТ.\n` +
+      `Ознаки МЕНЕДЖЕРА: вітається від імені сервісу; питає марку/проблему авто; пропонує запис, ціни, майстра.\n` +
+      `Ознаки КЛІЄНТА: описує СВОЮ проблему ("у мене стукає"), питає ціну, погоджується/відмовляється.\n` +
+      `Аналізуй ВЕСЬ діалог — клієнт міг заговорити першим ("алло?").\n` +
+      `Поверни JSON: reasoning (1-2 речення), manager (рівно один id: ${speakerIds.join(', ')}), confidence.`;
 
   try {
     const out = await withRetry(
@@ -155,22 +185,24 @@ async function pickManagerSpeaker(turns, speakerIds) {
       { attempts: 2, delayMs: 1000, label: 'OpenAI speaker role' }
     );
 
-    if (!speakerIds.includes(out.manager)) return heuristic ?? turns[0].speaker;
-    // Low-confidence LLM that disagrees with a clear keyword signal → trust the heuristic.
-    if (out.confidence === 'low' && heuristic && heuristic !== out.manager) {
-      console.log(`[elevenlabs] low-confidence role (LLM=${out.manager}, keyword=${heuristic}) → using keyword heuristic`);
-      return heuristic;
+    if (!speakerIds.includes(out.manager)) return keyword ?? turns[0].speaker;
+    // Without a name to anchor on, a low-confidence answer that contradicts a clear operator-marker
+    // signal is overridden by the heuristic.
+    if (!managerName && out.confidence === 'low' && keyword && keyword !== out.manager) {
+      console.log(`[elevenlabs] low-confidence role (LLM=${out.manager}, keyword=${keyword}) → using keyword heuristic`);
+      return keyword;
     }
     return out.manager;
   } catch (err) {
     console.error(`[elevenlabs] role labeling failed, using keyword heuristic: ${err.message}`);
-    return heuristic ?? turns[0].speaker;
+    return keyword ?? turns[0].speaker;
   }
 }
 
-// Full pipeline: STT + diarize -> "Менеджер:/Клієнт:" dialogue string ready to store. If only one
-// speaker is detected (voicemail / IVR) there is no dialogue to build, so the plain text is returned.
-async function transcribeDiarized(audioBlob) {
+// Full pipeline: STT + diarize -> "Менеджер:/Клієнт:" dialogue string ready to store. managerName
+// (when known from Binotel) anchors role detection on our specific employee. If only one speaker is
+// detected (voicemail / IVR) there's no dialogue to build, so the plain text is returned.
+async function transcribeDiarized(audioBlob, managerName) {
   const data = await sttDiarize(audioBlob);
   const plain = (data.text || '').trim();
   const turns = buildTurns(data.words);
@@ -179,7 +211,7 @@ async function transcribeDiarized(audioBlob) {
   const speakerIds = [...new Set(turns.map((t) => t.speaker))];
   if (speakerIds.length < 2) return plain || turns.map((t) => t.text).join(' ');
 
-  const managerId = await pickManagerSpeaker(turns, speakerIds);
+  const managerId = await pickManagerSpeaker(turns, speakerIds, managerName);
   const label = (sid) => (sid === managerId ? 'Менеджер' : 'Клієнт');
   return turns.map((t) => `${label(t.speaker)}: ${t.text}`).join('\n\n');
 }
