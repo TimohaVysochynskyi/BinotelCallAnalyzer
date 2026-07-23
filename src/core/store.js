@@ -75,6 +75,37 @@ async function migrate() {
       value TEXT
     );
 
+    -- Persisted analytics results per (manager × time segment). The report "reduce" (the costly LLM
+    -- clustering into findings) is cached here so a segment is analysed ONCE and frozen: repeated
+    -- "Звіт зараз", the daily auto-reports and incremental reports all REUSE it instead of
+    -- re-analysing from scratch. Two kinds:
+    --   'scheduled'   — a canonical day-bounded segment [prev boundary, slot]/[slot, midnight]. These
+    --                   are the immutable time series used to track a manager's growth over time.
+    --   'manual_tail' — an ephemeral tail [last boundary, "now"] computed for a manual "Звіт зараз";
+    --                   deduped by call_ids so a double-click reuses it, GC'd later.
+    -- call_ids = the general_call_ids that fed the analysis (change detection / late-call self-heal).
+    -- meta = {rubricHash, promptHash, model, passes} — what logic/config produced this snapshot.
+    CREATE TABLE IF NOT EXISTS report_segments (
+      id SERIAL PRIMARY KEY,
+      manager_name TEXT NOT NULL,
+      period_start TIMESTAMPTZ NOT NULL,
+      period_end TIMESTAMPTZ NOT NULL,
+      kind TEXT NOT NULL,
+      findings JSONB NOT NULL DEFAULT '[]',
+      phrases JSONB NOT NULL DEFAULT '[]',
+      stats JSONB,
+      call_ids JSONB NOT NULL DEFAULT '[]',
+      candidate_count INTEGER,
+      analysis_version INTEGER NOT NULL DEFAULT 1,
+      meta JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS report_segments_uq
+      ON report_segments (manager_name, period_start, period_end, kind);
+    CREATE INDEX IF NOT EXISTS report_segments_lookup
+      ON report_segments (manager_name, kind, period_start);
+
     -- Free-text notes a supervisor leaves about an operator's work (added via the bot). Keyed
     -- by the operator NAME (Binotel is the source of truth for operators; there is no local
     -- managers table). operator_name matches calls.manager_name.
@@ -285,6 +316,92 @@ async function getCallsMissingPurpose() {
      ORDER BY start_time DESC`
   );
   return rows;
+}
+
+// ---- Persisted analytics segments (report_segments) --------------------------------------------
+// Cache/reuse of the report "reduce" per (manager × time segment). See the table comment in
+// migrate(). period_start/period_end are absolute UTC instants (day-bounded, Kyiv, computed by the
+// bot); kind is 'scheduled' (frozen time series) or 'manual_tail' (ephemeral, deduped).
+
+const SEGMENT_COLS = `manager_name AS "managerName", period_start AS "periodStart",
+  period_end AS "periodEnd", kind, findings, phrases, stats, call_ids AS "callIds",
+  candidate_count AS "candidateCount", analysis_version AS "analysisVersion", meta,
+  created_at AS "createdAt", updated_at AS "updatedAt"`;
+
+// One stored segment matching the exact (manager, start, end, kind), or null.
+async function getStoredSegment(managerName, start, end, kind) {
+  const { rows } = await pool.query(
+    `SELECT ${SEGMENT_COLS} FROM report_segments
+     WHERE manager_name = $1 AND period_start = $2 AND period_end = $3 AND kind = $4`,
+    [managerName, start, end, kind]
+  );
+  return rows[0] || null;
+}
+
+// Most recent manual_tail for (manager, start) regardless of end — used to dedup a repeated
+// "Звіт зараз" (compare call_ids; unchanged → reuse without re-analysing).
+async function getLatestManualTail(managerName, start) {
+  const { rows } = await pool.query(
+    `SELECT ${SEGMENT_COLS} FROM report_segments
+     WHERE manager_name = $1 AND period_start = $2 AND kind = 'manual_tail'
+     ORDER BY period_end DESC LIMIT 1`,
+    [managerName, start]
+  );
+  return rows[0] || null;
+}
+
+// Frozen 'scheduled' segments fully inside [rangeStart, rangeEnd], ordered — the reusable blocks
+// for assembling a period report / the growth time series.
+async function getScheduledSegmentsInRange(managerName, rangeStart, rangeEnd) {
+  const { rows } = await pool.query(
+    `SELECT ${SEGMENT_COLS} FROM report_segments
+     WHERE manager_name = $1 AND kind = 'scheduled'
+       AND period_start >= $2 AND period_end <= $3
+     ORDER BY period_start`,
+    [managerName, rangeStart, rangeEnd]
+  );
+  return rows;
+}
+
+// Insert or replace a segment (unique by manager+start+end+kind).
+async function upsertReportSegment(seg) {
+  await pool.query(
+    `INSERT INTO report_segments
+       (manager_name, period_start, period_end, kind, findings, phrases, stats, call_ids,
+        candidate_count, analysis_version, meta, updated_at)
+     VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb,$9,$10,$11::jsonb, now())
+     ON CONFLICT (manager_name, period_start, period_end, kind) DO UPDATE SET
+       findings = EXCLUDED.findings, phrases = EXCLUDED.phrases, stats = EXCLUDED.stats,
+       call_ids = EXCLUDED.call_ids, candidate_count = EXCLUDED.candidate_count,
+       analysis_version = EXCLUDED.analysis_version, meta = EXCLUDED.meta, updated_at = now()`,
+    [
+      seg.managerName, seg.periodStart, seg.periodEnd, seg.kind,
+      jsonParam(seg.findings ?? []), jsonParam(seg.phrases ?? []), jsonParam(seg.stats ?? null),
+      jsonParam(seg.callIds ?? []), seg.candidateCount ?? null,
+      seg.analysisVersion ?? 1, jsonParam(seg.meta ?? null),
+    ]
+  );
+}
+
+// The general_call_ids of processed calls in [start, end) for a manager — ordered, cheap. Used for
+// segment membership + late-call change detection (compare against a stored segment's call_ids).
+async function getCallIdsForOperator(managerName, start, end) {
+  const { rows } = await pool.query(
+    `SELECT general_call_id AS id FROM calls
+     WHERE manager_name = $1 AND start_time >= $2 AND start_time < $3
+       AND transcript IS NOT NULL AND transcript <> ''
+     ORDER BY start_time`,
+    [managerName, start, end]
+  );
+  return rows.map((r) => r.id);
+}
+
+// Delete ephemeral manual_tail rows older than `before` (GC; scheduled segments are never GC'd).
+async function deleteOldManualTails(before) {
+  await pool.query(
+    `DELETE FROM report_segments WHERE kind = 'manual_tail' AND created_at < $1`,
+    [before]
+  );
 }
 
 // ---- Operators (source of truth = Binotel names on the calls) -----------------------------
@@ -779,6 +896,26 @@ async function removeReportTime(hhmm) {
   return list;
 }
 
+// Dedup of scheduled-report DELIVERIES across restarts. A slot key is "YYYY-MM-DD-HH:MM" (Kyiv).
+// Stored as a JSON array, pruned to the most recent keys (a day has only a few slots).
+async function getDeliveredSlots() {
+  const raw = await getState('delivered_report_slots');
+  if (raw == null) return [];
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+async function markSlotDelivered(slotKey) {
+  const cur = await getDeliveredSlots();
+  if (cur.includes(slotKey)) return;
+  cur.push(slotKey);
+  await setState('delivered_report_slots', JSON.stringify(cur.slice(-30)));
+}
+
 export {
   migrate,
   callExists,
@@ -792,6 +929,12 @@ export {
   updateCallTranscript,
   updateCallAnalysis,
   getCallsMissingPurpose,
+  getStoredSegment,
+  getLatestManualTail,
+  getScheduledSegmentsInRange,
+  upsertReportSegment,
+  getCallIdsForOperator,
+  deleteOldManualTails,
   countOperatorCalls,
   listOperatorCalls,
   getCallByGeneralId,
@@ -822,6 +965,8 @@ export {
   getReportTimes,
   addReportTime,
   removeReportTime,
+  getDeliveredSlots,
+  markSlotDelivered,
   getElevenLabsBalanceState,
   setElevenLabsBalanceState,
   getStoredAnalyzePrompt,

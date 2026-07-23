@@ -46,7 +46,9 @@ function registerStats(bot) {
       ctx.api,
       ctx.chat.id,
       'upload_voice',
-      () => deliverManagerReport(ctx.api, ctx.chat.id, name, start, end, { audio: true }),
+      // 'day' uses the segmented cache (reuse frozen segments + live tail); longer periods use the
+      // single live reduce for now (Phase 2 will convert them to segment-list + trend).
+      () => deliverManagerReport(ctx.api, ctx.chat.id, name, start, end, { audio: true, segmented: period === 'day' }),
       { notice: '⏳ Формую доказовий звіт (аналіз + аудіо), це може зайняти деякий час…' }
     );
     if (res.empty) {

@@ -48,11 +48,16 @@ function runFfmpeg(args) {
 }
 
 // Collect the unique (callId,start,end) clips needed by a report — negatives only, capped per
-// finding — preserving which callId each belongs to.
+// finding — preserving which callId each belongs to. Findings live in report.blocks[].findings.
+function allFindings(report) {
+  if (Array.isArray(report.blocks)) return report.blocks.flatMap((b) => b.findings || []);
+  return report.findings || [];
+}
+
 function neededClips(report) {
   const seen = new Set();
   const clips = [];
-  for (const f of report.findings) {
+  for (const f of allFindings(report)) {
     if (f.type !== 'error') continue;
     let n = 0;
     for (const ev of f.evidence) {

@@ -1,5 +1,5 @@
 import { withRetry } from '../core/retry.js';
-import { findQuote } from '../core/quoteMatch.js';
+import { findQuote, normalize } from '../core/quoteMatch.js';
 import { SALES_STAGES } from '../core/stages.js';
 import {
   getStoredAnalyzePrompt,
@@ -273,15 +273,10 @@ async function verifyFindingsRelevance(findings) {
   return kept;
 }
 
-// calls: rows from store.getCallsForReport (with cached behaviors + segments). stats: numeric block
-// from store.getOperatorStats. Returns { findings, phrases } where each finding has >= MIN_EVIDENCE
-// verified, distinct evidence and findings are ordered errors-first.
-async function reduceFindings(managerName, calls, stats) {
-  const { candidates } = buildCandidates(calls);
-  if (candidates.length < MIN_EVIDENCE) {
-    return { findings: [], phrases: [] };
-  }
-
+// One raw REDUCE pass (the gpt-4o findings call). Returns the model's raw output
+// {findings, recommended_phrases}; the caller verifies/assembles. Separated so self-consistency can
+// run it several times.
+async function runReducePass(managerName, candidates, stats) {
   const rate = stats.callCount ? Math.round((stats.successCount / stats.callCount) * 100) : 0;
   const metricsLine =
     `Менеджер: ${managerName}. Дзвінків: ${stats.callCount}, записів/успішних: ${stats.successCount} ` +
@@ -296,11 +291,9 @@ async function reduceFindings(managerName, calls, stats) {
     `Використовуй ТІЛЬКИ id зі списку. НЕ вигадуй цитат і НЕ пиши цитати в тексті — цитати підставить система за id.\n` +
     `Не додавай finding, якщо для нього немає щонайменше ${MIN_EVIDENCE} доказів. Один id не використовуй у двох findings.`;
 
-  const user =
-    `${metricsLine}\n\nКАНДИДАТИ:\n` +
-    candidates.map(renderCandidate).join('\n');
+  const user = `${metricsLine}\n\nКАНДИДАТИ:\n` + candidates.map(renderCandidate).join('\n');
 
-  const raw = await withRetry(
+  return withRetry(
     async () => {
       const res = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -319,18 +312,103 @@ async function reduceFindings(managerName, calls, stats) {
     },
     { attempts: 2, delayMs: 2000, label: `OpenAI reduce ${managerName}` }
   );
+}
 
-  // Code-enforced evidence rules (pure, testable) — anti-fabrication / anti-dup / manager-role.
-  const assembled = assembleFindings(raw.findings, calls);
-  // Then an LLM relevance pass — drop quotes that don't actually demonstrate the claim.
-  const findings = await verifyFindingsRelevance(assembled);
-  const phrases = (raw.recommended_phrases || []).map((p) => String(p).trim()).filter(Boolean);
+// A stable key identifying a piece of evidence across reduce passes (same call + same manager line).
+const evidenceKey = (e) => `${e.callId}|${normalize(e.quote)}`;
+
+// Self-consistency clustering. Given the assembled findings from several independent reduce passes,
+// keep only findings CORROBORATED by a majority of passes, so a one-off hallucinated grouping can't
+// survive into a frozen segment. Two findings match if they are the same type and share >= 2 pieces
+// of evidence. A cluster is kept if it appears in >= ceil(passes/2) distinct passes; its evidence is
+// the union across members (deduped), and claim/why/action come from the member with most evidence.
+function corroborate(runs, passes) {
+  const all = [];
+  runs.forEach((findings, ri) =>
+    findings.forEach((f) => all.push({ f, ri, keys: new Set(f.evidence.map(evidenceKey)) }))
+  );
+  const clusters = [];
+  for (const item of all) {
+    let placed = false;
+    for (const c of clusters) {
+      if (c.type !== item.f.type) continue;
+      let shared = 0;
+      for (const k of item.keys) if (c.keys.has(k)) shared += 1;
+      if (shared >= 2) {
+        c.members.push(item);
+        item.keys.forEach((k) => c.keys.add(k));
+        c.runs.add(item.ri);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) clusters.push({ type: item.f.type, keys: new Set(item.keys), members: [item], runs: new Set([item.ri]) });
+  }
+  const majority = Math.floor(passes / 2) + 1; // strict majority: 2→2, 3→2, 4→3 (1→1 = keep all)
+  const kept = [];
+  for (const c of clusters) {
+    if (c.runs.size < majority) continue;
+    const rep = c.members.reduce((a, b) => (b.f.evidence.length > a.f.evidence.length ? b : a)).f;
+    const seen = new Set();
+    const evidence = [];
+    for (const m of c.members) {
+      for (const e of m.f.evidence) {
+        const k = evidenceKey(e);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        evidence.push(e);
+      }
+    }
+    kept.push({ type: rep.type, claim: rep.claim, why: rep.why, action: rep.action, evidence });
+  }
+  kept.sort((a, b) => (a.type === b.type ? 0 : a.type === 'error' ? -1 : 1));
+  return kept;
+}
+
+// Consistency-hardened reduce for a FROZEN segment (analysed once, then cached). Runs the reduce
+// `passes` times, keeps only majority-corroborated findings, then does the single relevance pass.
+// passes<=1 collapses to the plain single-pass reduce (used by the live multi-day path).
+async function reduceFindingsConsistent(managerName, calls, stats, passes = 1) {
+  const { candidates } = buildCandidates(calls);
+  if (candidates.length < MIN_EVIDENCE) return { findings: [], phrases: [] };
+
+  const n = Math.max(1, passes);
+  const raws = [];
+  for (let i = 0; i < n; i += 1) raws.push(await runReducePass(managerName, candidates, stats));
+
+  const assembledRuns = raws.map((raw) => assembleFindings(raw.findings, calls));
+  const corroborated = n > 1 ? corroborate(assembledRuns, n) : assembledRuns[0];
+  // LLM relevance pass — drop quotes that don't actually demonstrate the claim.
+  const findings = await verifyFindingsRelevance(corroborated);
+
+  // Phrases: union across passes, deduped, capped (they're ideal-phrasing samples, not evidence).
+  const seen = new Set();
+  const phrases = [];
+  for (const raw of raws) {
+    for (const p of raw.recommended_phrases || []) {
+      const t = String(p).trim();
+      if (!t || seen.has(t)) continue;
+      seen.add(t);
+      phrases.push(t);
+      if (phrases.length >= 7) break;
+    }
+    if (phrases.length >= 7) break;
+  }
   return { findings, phrases };
+}
+
+// calls: rows from store.getCallsForReport (with cached behaviors + segments). stats: numeric block
+// from store.getOperatorStats. Single-pass reduce (live path, e.g. multi-day stats). Returns
+// { findings, phrases } — each finding has >= MIN_EVIDENCE verified, distinct evidence, errors-first.
+async function reduceFindings(managerName, calls, stats) {
+  return reduceFindingsConsistent(managerName, calls, stats, 1);
 }
 
 export {
   reduceFindings,
+  reduceFindingsConsistent,
   assembleFindings,
+  corroborate,
   MIN_EVIDENCE,
   DEFAULT_REPORT_GUIDANCE,
   getAnalyzePrompt,

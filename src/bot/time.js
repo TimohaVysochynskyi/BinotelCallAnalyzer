@@ -93,6 +93,31 @@ function periodRange(period, now = new Date()) {
   return { start: def.start(now), end: now, label: def.label };
 }
 
+// Day-bounded segment boundaries for the Kyiv calendar day containing `now`, from the report-time
+// slots (["13:00","19:30"]). Returns consecutive [start,end) intervals as absolute UTC instants:
+//   [00:00, slot1), [slot1, slot2), …, [lastSlot, 24:00)
+// so a day is fully tiled with no gaps (evening calls after the last slot land in the final
+// segment). Slots are clamped to (00:00, 24:00) and de-duplicated/sorted; invalid ones ignored.
+// Adding slot-minutes to Kyiv midnight is offset-correct except on the ~2 DST-transition days/year.
+function slotMinutes(s) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(s).trim());
+  if (!m) return null;
+  const mins = Number(m[1]) * 60 + Number(m[2]);
+  return mins > 0 && mins < 24 * 60 ? mins : null;
+}
+
+function kyivDaySegments(now, slots = []) {
+  const p = kyivParts(now);
+  const midnight = kyivMidnightUtc(p.year, p.month, p.day);
+  const next = shiftKyivDate(p, 1);
+  const nextMidnight = kyivMidnightUtc(next.year, next.month, next.day);
+  const mins = [...new Set(slots.map(slotMinutes).filter((x) => x != null))].sort((a, b) => a - b);
+  const bounds = [midnight, ...mins.map((x) => new Date(midnight.getTime() + x * 60000)), nextMidnight];
+  const segs = [];
+  for (let i = 0; i < bounds.length - 1; i += 1) segs.push({ start: bounds[i], end: bounds[i + 1] });
+  return segs;
+}
+
 // "08.07.2026 14:35" in Kyiv time.
 function formatKyiv(date) {
   const p = kyivParts(date);
@@ -107,4 +132,4 @@ function shortDate(date) {
   return `${pad(p.day)}.${pad(p.month)}.${String(p.year).slice(-2)}`;
 }
 
-export { kyivParts, periodRange, startOfDay, formatKyiv, shortDate };
+export { kyivParts, periodRange, startOfDay, kyivDaySegments, formatKyiv, shortDate };

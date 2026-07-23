@@ -50,34 +50,34 @@
 | `analysis_version` | INT | =2. |
 | `is_success`,`weakest_stage`,`communication_score` | — | Класифікація. |
 
-`app_state`: `last_polled_until`, `last_report_slot`/`last_report_until`, `analyze_prompt`, `score_rubric` (рубрика `communicationScore`, `/rubric`), `report_recipients`/`alert_recipients`, `report_times`, `elevenlabs_balance_state`.
+`app_state`: `last_polled_until`, `analyze_prompt`, `score_rubric` (рубрика `communicationScore`, `/rubric`), `report_recipients`/`alert_recipients`, `report_times`, `delivered_report_slots` (дедуп доставлених слотів авто-звіту), `elevenlabs_balance_state`.
+
+**`report_segments`** (Задача 3) — кеш аналітики по `(manager_name × [period_start,period_end] × kind)`: `findings`/`phrases`/`stats`/`call_ids` JSONB, `candidate_count`, `analysis_version`, `meta` (`{rubricHash,promptHash,model,passes}`). `kind` = `scheduled` (незмінний ряд росту, self-consistency) / `manual_tail` (ефемерний, дедуп по `call_ids`, GC >2 діб). Пише БОТ. Функції в `store.js`: `getStoredSegment/getLatestManualTail/getScheduledSegmentsInRange/upsertReportSegment/getCallIdsForOperator/deleteOldManualTails` + `getDeliveredSlots/markSlotDelivered`.
 
 ---
 
-## C. Звіт (per-report, map→reduce з кешу)
+## C. Звіт (персистентна аналітика по відрізках — Задача 3, Фаза 1)
 
-Тригери: кнопка/`/report` (`sendManualReport`), «Статистика менеджера» (`stat:go` → `deliverManagerReport`), розклад (`maybeSendScheduledReport`). Усі в [report.js](src/bot/report.js).
+Тригери: кнопка/`/report` (`sendManualReport`), «Статистика менеджера» (`stat:go` → `deliverManagerReport`), розклад (`maybeSendScheduledReport`). Оркестрація — [report.js](src/bot/report.js), кеш/збірка — [segments.js](src/bot/segments.js).
 
-1. **Метрики** — `getOperatorStats(name,start,end)` ([store.js](src/core/store.js), `SALES_FILTER`): `callCount`, `salesCount`, `infoCount`, `successCount` (по продажних), `avgScore`, `topWeakStage`. Конверсія = `successCount/salesCount`.
-2. **Кандидати** — `getCallsForReport` → `buildCandidates(calls)` ([analyze.js](src/bot/analyze.js)): плоский пул `behaviors.items` з id `e0..eN`. **Пропускає `call_purpose` `info`/`other`.**
-3. **REDUCE** — `reduceFindings(name, calls, stats)` (`OPENAI_REPORT_MODEL`): модель кластеризує кандидатів у findings, посилаючись на докази **лише за id** (не може вигадати цитату). Схема `FINDINGS_SCHEMA`. Guidance-промпт — `getAnalyzePrompt()` (`app_state.analyze_prompt` або `DEFAULT_REPORT_GUIDANCE`; редагується `/prompt` [prompt.js](src/bot/prompt.js)).
-4. **Код-верифікація** — `assembleFindings(raw, calls)` (чиста, юніт-тестована):
-   - id → кандидат; тип має збігатися; `verifyCandidate` → `findQuote(...,{requireRole:'manager'})`;
-   - дедуп: один id → один finding;
-   - finding з `< MIN_EVIDENCE` (=3) → відкидається;
-   - сортування «errors first».
-5. **Перевірка релевантності** — `verifyFindingsRelevance(findings)` (`OPENAI_REPORT_MODEL`, `RELEVANCE_SCHEMA`): суворий рецензент → які цитати справді доводять claim; нерелевантні відкидаються, finding `<3` валиться. Фейл API → fallback на assembled.
-6. **Готові фрази** — `recommended_phrases` від моделі (ЗРАЗКИ, не з транскриптів).
+**Ідея:** дорогий REDUCE рахується РАЗ на день-обмежений відрізок і **замерзає** в `report_segments`; звіти лише агрегують заморожене + свіжий хвіст. Це прибрало повтори (подвійний клік, авто+ручний) і дало часовий ряд для РОСТУ.
 
-Finding (після пайплайну): `{type, claim, why, action, evidence:[{callId, startTime, quote, start, end}]}`.
+- **Відрізки** — межі доби Київ, розбиті слотами (`time.js: kyivDaySegments`): `[00:00,слот1),…,[остСлот,24:00)`, без дір.
+- **`assembleReport(name,start,end)`** ([segments.js](src/bot/segments.js)): числа live (`getOperatorStats`) → перелічити день-обмежені відрізки в періоді → кожен ПОВНИЙ = `getOrComputeScheduledSegment` (reuse замороженого / порахувати+зберегти) → залишок `[остання межа, now]` = `computeTail` (ефемерний `manual_tail`). Повертає **блоки** `[{start,end,kind,findings,phrases}]`.
+- **REDUCE із self-consistency** — `reduceFindingsConsistent(name,calls,stats,passes)`: `runReducePass` × `SEGMENT_CONSISTENCY_PASSES`(3) → `assembleFindings` кожен → `corroborate` (кластер за перетином доказів, лишити підтверджені строгою більшістю прогонів) → один `verifyFindingsRelevance`. Заморожені відрізки — з повними passes; ефемерний хвіст — 1 pass.
+- **Код-верифікація** `assembleFindings` (як раніше): id→кандидат, тип збігається, `findQuote(requireRole:'manager')`, дедуп, `< MIN_EVIDENCE`(3) → відкид, errors-first.
+- **Дедуп/цілісність** — подвійний клік: `manual_tail` з тим самим `call_ids` віддається без аналізу. Grace: слот віддається через `SEGMENT_GRACE_MIN`(10) хв. Self-heal: недавній (≤24 год) заморожений відрізок зі зміненим `call_ids` перераховується.
+- **Готові фрази** — `recommended_phrases` від моделі (об'єднання по прогонах, дедуп, ≤7).
+
+Блок finding: `{type, claim, why, action, evidence:[{callId, startTime, quote, start, end}]}`. ⚠️ Тиждень/місяць/квартал у «Статистиці менеджера» поки на живому single-reduce (`buildManagerEvidenceReport`, один блок); Фаза 2 → список відрізків + тренд.
 
 ---
 
 ## D. Доставка (Telegram)
 
 `deliverReport(api, chatId, report, {clips})` ([report.js](src/bot/report.js)):
-- header (`headerText`, Markdown): всього / продажних / інформаційних, конверсія й найслабший етап **по продажних**;
-- findings (`findingText`, plain — цитати можуть містити `_*[`);
+- header (`headerText`, Markdown): всього / продажних / інформаційних, конверсія й найслабший етап **по продажних** (по всьому періоду, live);
+- **блоки по відрізках** (`report.blocks`): якщо блоків >1 — підзаголовок `blockHeader` з інтервалом (основа відстеження росту); findings (`findingText`, plain — цитати можуть містити `_*[`);
 - **аудіо лише під `error`-findings**: `prepareClips(report)` ([audioClip.js](src/bot/audioClip.js)) — системний ffmpeg вирізає `[start−pad, end+pad]` (`AUDIO_CLIP_PAD_SEC`), ≤3 кліпи/finding, кеш завантаження mp3 на дзвінок; нема ffmpeg → текст (preflight `ffmpegAvailable`, не падає); `sendClip`;
 - готові фрази;
 - **рендериться ЗАВЖДИ**: нема findings → «критичних патернів не зафіксовано» / «продажних дзвінків не було».
@@ -128,6 +128,8 @@ Fan-out: `sendScheduledReport` будує звіт+кліпи ОДИН раз н
 | `ELEVENLABS_USD_PER_1000_CREDITS` | `0.22` | Кредити→USD (калібрувати під дашборд). |
 | `SHARED_EXTENSIONS` | `901,902` | Спільні номери → `identifyManager`. |
 | `BACKFILL_LIMIT` / `RETRANSCRIBE_LAST_LIMIT` | `30` / `7` | Глибина беклогу / re-run. |
+| `SEGMENT_CONSISTENCY_PASSES` | `3` | Скільки прогонів REDUCE на заморожений відрізок (self-consistency). |
+| `SEGMENT_GRACE_MIN` | `10` | Затримка віддачі слота авто-звіту (щоб ретраї встигли до заморозки відрізка). |
 
 ---
 
