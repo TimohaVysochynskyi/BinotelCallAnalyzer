@@ -300,6 +300,43 @@ async function updateCallAnalysis(generalCallId, { transcript, segments, behavio
   );
 }
 
+// Full overwrite (transcript + segments + behaviors + call_purpose + classification), used by the
+// historical re-analysis backfill (src/scripts/backfillAnalysis.js) when it re-transcribes a call
+// via ElevenLabs and re-classifies it — unlike updateCallAnalysis, this ALSO replaces is_success/
+// weakest_stage/communication_score (null for non-sales calls, matching a fresh ingest's saveCall).
+async function updateCallFullAnalysis(generalCallId, { transcript, segments, behaviors, analysisVersion, callPurpose, isSuccess, weakestStage, communicationScore }) {
+  await pool.query(
+    `UPDATE calls SET transcript = COALESCE($2, transcript),
+       segments = $3::jsonb, behaviors = $4::jsonb, analysis_version = $5, call_purpose = $6,
+       is_success = $7, weakest_stage = $8, communication_score = $9
+     WHERE general_call_id = $1`,
+    [
+      generalCallId,
+      transcript ?? null,
+      jsonParam(segments),
+      jsonParam(behaviors),
+      analysisVersion ?? null,
+      callPurpose ?? null,
+      isSuccess ?? null,
+      weakestStage ?? null,
+      communicationScore ?? null,
+    ]
+  );
+}
+
+// All calls still missing ElevenLabs timecodes (segments IS NULL) but with a stored transcript -
+// regardless of operator (named/bare/shared). Used by the historical re-analysis backfill to find
+// EVERYTHING that needs re-transcribing, not just a capped recent window per operator.
+async function getCallsMissingSegments() {
+  const { rows } = await pool.query(
+    `SELECT general_call_id AS "generalCallId", manager_name AS "managerName"
+     FROM calls
+     WHERE segments IS NULL AND transcript IS NOT NULL AND transcript <> ''
+     ORDER BY start_time DESC`
+  );
+  return rows;
+}
+
 // Historical calls ingested before call_purpose existed (call_purpose IS NULL) that still have a
 // stored transcript. The cheap purpose-only backfill (src/scripts/backfillPurpose.js) re-maps these
 // over the ALREADY-STORED transcript (no re-transcription) to set call_purpose, so routine info/
@@ -991,6 +1028,8 @@ export {
   getRecentCallsForOperator,
   updateCallTranscript,
   updateCallAnalysis,
+  updateCallFullAnalysis,
+  getCallsMissingSegments,
   getCallsMissingPurpose,
   getStoredSegment,
   getLatestManualTail,
