@@ -67,15 +67,10 @@ function buildDynamicsText(name, bucket, buckets) {
 
   // Trajectory table (monospace). "Перша"/"Друга" are placeholder columns (content TBD - see
   // CLAUDE.md "Поточний статус") added just to check that a 6-column table still fits on mobile.
-  // "Бал" is deliberately asymmetric: the header sits 1 char further LEFT than before (no
-  // padding - "Бал" already fills its 3-char field) while the data cells sit 1 char further
-  // RIGHT (padded to 5 instead of 4). BAL_GAP compensates the header's trailing space so the
-  // "Перша" column still lines up between the header row and every data row despite the two
-  // fields having different widths (3 vs 5): 1 + (5 - 3) = 3 spaces.
-  const BAL_HEADER = "Бал";
+  // "Бал" data cells are 1 char wider than the header (5 vs 4 - `BAL_DATA_WIDTH` below), so the
+  // header line has one extra space before "Перша" to keep that column aligned with the data rows.
   const BAL_DATA_WIDTH = 5;
-  const BAL_GAP = " ".repeat(1 + (BAL_DATA_WIDTH - BAL_HEADER.length));
-  const head = `${"Період".padEnd(10)}${"Дзв".padStart(4)} ${"Кон".padStart(5)} ${BAL_HEADER}${BAL_GAP}${"Перша".padStart(5)} ${"Друга".padStart(5)}`;
+  const head = `${"Період".padEnd(10)}${"Дзв".padStart(4)} ${"Кон".padStart(5)} ${"Бал".padStart(4)}  ${"Перша".padStart(5)} ${"Друга".padStart(5)}`;
   const rows = [head];
   buckets.forEach((b, i) => {
     const prev = i > 0 ? buckets[i - 1] : null;
