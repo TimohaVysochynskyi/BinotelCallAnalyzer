@@ -41,7 +41,7 @@ function featureOf(ctx) {
     if (cq === 'menu' || cq === 'noop') return 'menu';
     if (cq === 'kb:ask') return 'kb_ask';
     if (cq.startsWith('kb:')) return 'kb_edit'; // menu/add/doc/open/del/delok/aud/audset/audput = file mgmt
-    if (cq.startsWith('stat:') || cq.startsWith('note:')) return 'stats_all';
+    if (cq.startsWith('stat:')) return 'stats_all';
     if (cq.startsWith('arch:')) return 'archive';
     if (cq.startsWith('report')) return 'report';
     if (cq.startsWith('prompt')) return 'prompt';

@@ -1,11 +1,11 @@
 import { InlineKeyboard, Keyboard } from 'grammy';
-import { getOperators, getOperatorStats, getBucketedTrend, listOperatorNotes } from '../core/store.js';
+import { getOperators, getOperatorStats, getBucketedTrend } from '../core/store.js';
 import { operatorListKeyboard, periodKeyboard, operatorLabel } from './keyboards.js';
 import { displayName, formatPhone } from './operators.js';
 import { deliverManagerReport } from './report.js';
 import { buildDynamicsText } from './dynamics.js';
 import { periodRange, formatKyiv } from './time.js';
-import { sendLong, showScreen, withProgress } from './ui.js';
+import { showScreen, withProgress } from './ui.js';
 
 // Content for the "choose a manager" screen - reused by the inline button (edits the message)
 // and by the /stats command.
@@ -30,9 +30,6 @@ async function showDynamics(ctx, name, bucket) {
     .text(`🗓 Місяці${tick('month')}`, `stat:dyn:month:${name}`)
     .row()
     .text('📊 Звіт за період →', `stat:rep:${name}`)
-    .row()
-    .text('📝 Нотатка', `note:add:${name}`)
-    .text('🗒 Нотатки', `note:list:${name}`)
     .row()
     .text('« Менеджери', 'stat:pick')
     .text('« Меню', 'menu');
@@ -72,9 +69,6 @@ function registerStats(bot) {
     const { start, end } = periodRange(period);
     await ctx.answerCallbackQuery();
     const kb = new InlineKeyboard()
-      .text('📝 Нотатка', `note:add:${name}`)
-      .text('🗒 Нотатки', `note:list:${name}`)
-      .row()
       .text('« Періоди', `stat:rep:${name}`)
       .text('📈 Динаміка', `stat:op:${name}`)
       .row()
@@ -95,29 +89,6 @@ function registerStats(bot) {
       return;
     }
     await showScreen(ctx, `${operatorLabel(name)} — дії:`, kb);
-  });
-
-  bot.callbackQuery(/^note:add:(.+)$/, async (ctx) => {
-    const name = ctx.match[1];
-    ctx.session.awaiting = { type: 'note', operator: name };
-    await ctx.answerCallbackQuery();
-    await ctx.reply(`📝 Надішліть текст нотатки для ${displayName(name)} одним повідомленням.`);
-  });
-
-  bot.callbackQuery(/^note:list:(.+)$/, async (ctx) => {
-    const name = ctx.match[1];
-    const notes = await listOperatorNotes(name, 10);
-    await ctx.answerCallbackQuery();
-    if (!notes.length) {
-      await ctx.reply(`Нотаток для ${displayName(name)} ще немає.`);
-      return;
-    }
-    const text =
-      `🗒 Нотатки — *${displayName(name)}*\n\n` +
-      notes
-        .map((n) => `• ${formatKyiv(new Date(n.createdAt))}${n.author ? ` (${n.author})` : ''}\n${n.note}`)
-        .join('\n\n');
-    await sendLong(ctx.api, ctx.chat.id, text, { parseMode: 'Markdown' });
   });
 
   registerMyStats(bot);

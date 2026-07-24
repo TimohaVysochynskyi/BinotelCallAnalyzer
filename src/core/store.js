@@ -106,26 +106,16 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS report_segments_lookup
       ON report_segments (manager_name, kind, period_start);
 
-    -- Free-text notes a supervisor leaves about an operator's work (added via the bot). Keyed
-    -- by the operator NAME (Binotel is the source of truth for operators; there is no local
-    -- managers table). operator_name matches calls.manager_name.
-    CREATE TABLE IF NOT EXISTS manager_notes (
-      id SERIAL PRIMARY KEY,
-      operator_name TEXT,
-      author TEXT,
-      note TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-    ALTER TABLE manager_notes ADD COLUMN IF NOT EXISTS operator_name TEXT;
+    -- manager_notes (per-operator free-text notes) removed by request - the feature is gone from
+    -- the bot entirely, not just hidden. DROP is idempotent (no-op once applied).
+    DROP TABLE IF EXISTS manager_notes;
 
     -- One-time cleanup of pre-refactor artifacts. Binotel is now the source of truth for
     -- operators (see identifyManager / resolveManagerName), so the local managers table and
-    -- the manager_id foreign keys are gone; attribution keys off calls.manager_name only.
-    -- Dropping calls.manager_id / manager_notes.manager_id also drops their FKs to managers,
-    -- which is why those columns go before the table. Guarded with IF EXISTS => a no-op once
-    -- applied. Both columns were 100% NULL before removal, so no data is lost.
+    -- the manager_id foreign key are gone; attribution keys off calls.manager_name only.
+    -- Guarded with IF EXISTS => a no-op once applied. The column was 100% NULL before removal,
+    -- so no data is lost.
     ALTER TABLE calls DROP COLUMN IF EXISTS manager_id;
-    ALTER TABLE manager_notes DROP COLUMN IF EXISTS manager_id;
     DROP TABLE IF EXISTS managers;
 
     -- call_type (incoming/outgoing marker from Binotel) removed by request — dropped from all rows
@@ -657,23 +647,6 @@ async function clearAllReportSegments() {
   return rowCount;
 }
 
-async function addOperatorNote(operatorName, author, note) {
-  await pool.query(
-    `INSERT INTO manager_notes (operator_name, author, note) VALUES ($1, $2, $3)`,
-    [operatorName, author || null, note]
-  );
-}
-
-async function listOperatorNotes(operatorName, limit = 10) {
-  const { rows } = await pool.query(
-    `SELECT note, author, created_at AS "createdAt"
-     FROM manager_notes WHERE operator_name = $1
-     ORDER BY created_at DESC LIMIT $2`,
-    [operatorName, limit]
-  );
-  return rows;
-}
-
 // ---- Knowledge base (RAG over uploaded manuals, pgvector) ---------------------------------
 
 // Separate from migrate() so a missing pgvector extension disables only the KB, not the whole
@@ -1029,8 +1002,6 @@ export {
   renameManagerEverywhere,
   deleteCallsByExtension,
   clearAllReportSegments,
-  addOperatorNote,
-  listOperatorNotes,
   migrateKb,
   insertKbDoc,
   insertKbChunks,

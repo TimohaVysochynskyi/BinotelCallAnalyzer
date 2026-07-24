@@ -3,7 +3,6 @@ import { Bot, session } from 'grammy';
 import {
   migrate,
   migrateKb,
-  addOperatorNote,
   activatePendingByPhone,
   setBotUserPhone,
   normalizePhone,
@@ -19,7 +18,7 @@ import { registerRoles, openRolesMenu, addByPhoneText } from './roles.js';
 import { registerSettings, openSettings, addRecipientByIdText } from './settings.js';
 import { setAnalyzePrompt } from './analyze.js';
 import { setScoreRubric } from '../core/classifyCall.js';
-import { displayName, formatPhone } from './operators.js';
+import { formatPhone } from './operators.js';
 import {
   getUser,
   canAccess,
@@ -257,14 +256,6 @@ bot.on('message:text', async (ctx) => {
 
   if (st?.type === 'save_phone') {
     await ctx.reply('Скористайтеся кнопкою «📱 Поділитися моїм номером» нижче, або « Скасувати.');
-    return;
-  }
-
-  if (st?.type === 'note') {
-    const author = ctx.from.username ? `@${ctx.from.username}` : String(ctx.from.id);
-    await addOperatorNote(st.operator, author, ctx.message.text);
-    ctx.session.awaiting = null;
-    await ctx.reply(`✅ Нотатку збережено для ${displayName(st.operator)}.`, { reply_markup: mainMenu(ctx.role) });
     return;
   }
 

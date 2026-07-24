@@ -10,13 +10,26 @@ const MONTHS_UK = ['січ', 'лют', 'бер', 'кві', 'тра', 'чер', '
 const pad2 = (n) => String(n).padStart(2, '0');
 const partsOf = (ymd) => ymd.split('-').map(Number); // [y, m, d]
 
-// "dd.mm–dd.mm" for a week starting at ymd (Monday), or "лип'26" for a month.
+// Ukrainian plural agreement (1 / 2-4 / 5+, with the 11-14 exception) - e.g. pluralize(4, 'тиждень',
+// 'тижні', 'тижнів') === 'тижні', pluralize(5, ...) === 'тижнів'.
+function pluralize(n, one, few, many) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+const bucketWord = (n, bucket) =>
+  bucket === 'month' ? pluralize(n, 'місяць', 'місяці', 'місяців') : pluralize(n, 'тиждень', 'тижні', 'тижнів');
+
+// "dd.mm–dd" for a week starting at ymd (Monday, end day only - no year/month repeated, saves
+// space), or "лип'26" for a month.
 function bucketLabel(ymd, bucket) {
   const [y, m, d] = partsOf(ymd);
   if (bucket === 'month') return `${MONTHS_UK[m - 1]}'${String(y).slice(-2)}`;
   const endMs = Date.UTC(y, m - 1, d + 6);
   const e = new Date(endMs);
-  return `${pad2(d)}.${pad2(m)}–${pad2(e.getUTCDate())}.${pad2(e.getUTCMonth() + 1)}`;
+  return `${pad2(d)}.${pad2(m)}–${pad2(e.getUTCDate())}`;
 }
 
 const convOf = (b) => (b.salesCount ? Math.round((b.successCount / b.salesCount) * 100) : 0);
@@ -29,23 +42,16 @@ function arrow(cur, prev) {
   return '·';
 }
 
-const shortStage = (s) => {
-  if (!s) return '—';
-  return s
-    .replace('виявлення потреби', 'виявл. потреби')
-    .replace('робота із запереченнями', 'заперечення')
-    .replace('закриття угоди', 'закриття');
-};
-
 // Returns the message text (Markdown; the trajectory table is in a ``` block so columns align).
 function buildDynamicsText(name, bucket, buckets) {
-  const title = `📈 *Динаміка — ${displayName(name)}*  ·  ${bucket === 'month' ? 'місяці' : 'тижні'}`;
   if (!buckets.length) {
-    return `${title}\n\nЩе немає даних для цього менеджера.`;
+    return `📈 *Менеджер: ${displayName(name)}*\n\nЩе немає даних для цього менеджера.`;
   }
+  const title = `📈 *Менеджер: ${displayName(name)}* · останні ${buckets.length} ${bucketWord(buckets.length, bucket)}`;
 
-  // Trajectory table (monospace).
-  const head = `${'Період'.padEnd(13)}${'Дзв'.padStart(4)} ${'Конв'.padStart(5)} ${'Бал'.padStart(5)}`;
+  // Trajectory table (monospace). "Перша"/"Друга" are placeholder columns (content TBD - see
+  // CLAUDE.md "Поточний статус") added just to check that a 6-column table still fits on mobile.
+  const head = `${'Період'.padEnd(10)}${'Дзв'.padStart(4)} ${'кон'.padStart(5)} ${'Бал'.padStart(4)} ${'Перша'.padStart(5)} ${'Друга'.padStart(5)}`;
   const rows = [head];
   buckets.forEach((b, i) => {
     const prev = i > 0 ? buckets[i - 1] : null;
@@ -53,17 +59,19 @@ function buildDynamicsText(name, bucket, buckets) {
     const convArr = prev ? arrow(conv, convOf(prev)) : ' ';
     const scoreNum = b.avgScore == null ? null : Number(b.avgScore);
     const scoreArr = prev ? arrow(scoreNum, prev.avgScore == null ? null : Number(prev.avgScore)) : ' ';
-    const label = bucketLabel(b.bucketStart, bucket).padEnd(13);
+    const label = bucketLabel(b.bucketStart, bucket).padEnd(10);
     const calls = String(b.callCount).padStart(4);
     const convCell = `${conv}%${convArr}`.padStart(5);
-    const scoreCell = `${b.avgScore ?? '—'}${scoreArr}`.padStart(5);
-    rows.push(`${label}${calls} ${convCell} ${scoreCell}`);
+    const scoreCell = `${b.avgScore ?? '—'}${scoreArr}`.padStart(4);
+    const placeholder1 = '—'.padStart(5);
+    const placeholder2 = '—'.padStart(5);
+    rows.push(`${label}${calls} ${convCell} ${scoreCell} ${placeholder1} ${placeholder2}`);
   });
   const table = '```\n' + rows.join('\n') + '\n```';
 
-  // Weakest-stage evolution (one line per bucket).
+  // Weakest-stage evolution (one line per bucket) - full stage name, never abbreviated.
   const stageLines = buckets
-    .map((b) => `• ${bucketLabel(b.bucketStart, bucket)}: ${shortStage(b.topWeakStage)}`)
+    .map((b) => `• ${bucketLabel(b.bucketStart, bucket)}: ${b.topWeakStage || '—'}`)
     .join('\n');
 
   // Growth verdict: compare the first vs last MEANINGFUL bucket, ignoring near-empty ones (a bucket
@@ -90,24 +98,24 @@ function buildDynamicsText(name, bucket, buckets) {
     else verdict = 'без змін ➖';
   }
 
-  // Recurring weakness = most frequent per-bucket weakest stage.
-  const freq = {};
-  buckets.forEach((b) => {
-    if (b.topWeakStage) freq[b.topWeakStage] = (freq[b.topWeakStage] || 0) + 1;
-  });
-  const recurring = Object.entries(freq).sort((a, b) => b[1] - a[1])[0];
+  // Summary shows AVERAGES over the shown period (not first→last deltas - that's what the verdict
+  // above is for). Conversion is weighted by each bucket's actual sales/success counts; score is a
+  // simple mean of the per-bucket averages (that's the finest grain store.getBucketedTrend gives us).
+  const totalSales = buckets.reduce((s, b) => s + (b.salesCount || 0), 0);
+  const totalSuccess = buckets.reduce((s, b) => s + (b.successCount || 0), 0);
+  const avgConv = totalSales ? Math.round((totalSuccess / totalSales) * 100) : null;
+  const scoredBuckets = buckets.filter((b) => b.avgScore != null);
+  const avgScoreOverall = scoredBuckets.length
+    ? Math.round((scoredBuckets.reduce((s, b) => s + Number(b.avgScore), 0) / scoredBuckets.length) * 10) / 10
+    : null;
 
-  const convWord = dConv == null ? '—' : dConv === 0 ? '±0' : `${dConv > 0 ? '+' : ''}${dConv} п.п.`;
-  const scoreWord = dScore == null ? '—' : dScore === 0 ? '±0' : `${dScore > 0 ? '+' : ''}${dScore}`;
-  const convLine = `Конверсія ${convFirst ?? '—'}%→${convLast ?? '—'}% (${convWord})`;
-  const scoreLine = `бал ${sFirst ?? '—'}→${sLast ?? '—'} (${scoreWord})`;
   const summary =
-    `📊 *Підсумок за ${buckets.length} ${bucket === 'month' ? 'міс.' : 'тижн.'}:*\n` +
-    `${convLine}, ${scoreLine}.\n` +
-    (recurring ? `Найчастіша слабина: ${shortStage(recurring[0])} (${recurring[1]}/${buckets.length}).\n` : '') +
+    `📊 *Підсумок за ${buckets.length} ${bucketWord(buckets.length, bucket)}:*\n` +
+    `Конверсія ${avgConv ?? '—'}%\n` +
+    `Бал ${avgScoreOverall ?? '—'}\n` +
     `Динаміка: *${verdict}*`;
 
-  return `${title}\n\n${table}\n🎯 *Слабкий етап по бакетах:*\n${stageLines}\n\n${summary}`;
+  return `${title}\n\n${table}\n👎 *Проблемні сегменти воронки:*\n${stageLines}\n\n${summary}`;
 }
 
 export { buildDynamicsText };
