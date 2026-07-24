@@ -1,10 +1,10 @@
 import { InlineKeyboard, InputFile } from 'grammy';
 import { getOperators, countOperatorCalls, listOperatorCalls, getCallByGeneralId } from '../core/store.js';
 import { getCallRecordUrl } from '../core/binotel.js';
-import { operatorListKeyboard, periodKeyboard, operatorLabel } from './keyboards.js';
+import { operatorListKeyboard, operatorLabel } from './keyboards.js';
 import { displayName } from './operators.js';
 import { formatDialogue } from './dialogue.js';
-import { periodRange, kyivParts, formatKyiv } from './time.js';
+import { kyivParts, formatKyiv } from './time.js';
 import { sendLong, withProgress, showScreen } from './ui.js';
 
 const PAGE = 8;
@@ -42,27 +42,32 @@ function registerArchive(bot) {
     await showScreen(ctx, text, kb);
   });
 
+  // No period-picker step - straight to the (paginated) call list, newest first. The period step
+  // only added an extra tap and hid older calls behind a period choice; pagination already handles
+  // browsing progressively.
   bot.callbackQuery(/^arch:op:(.+)$/, async (ctx) => {
     const name = ctx.match[1];
     await ctx.answerCallbackQuery();
-    await showScreen(ctx, `${operatorLabel(name)} — оберіть період:`, periodKeyboard((p) => `arch:go:${p}:0:${name}`, 'arch:pick'));
+    await showArchivePage(ctx, name, 0);
   });
 
-  bot.callbackQuery(/^arch:go:(day|week|month|quarter):(\d+):(.+)$/, async (ctx) => {
-    const period = ctx.match[1];
-    const offset = Number(ctx.match[2]);
-    const name = ctx.match[3];
-    const { start, end, label } = periodRange(period);
-    const total = await countOperatorCalls(name, start, end);
+  bot.callbackQuery(/^arch:go:(\d+):(.+)$/, async (ctx) => {
+    const offset = Number(ctx.match[1]);
+    const name = ctx.match[2];
+    await ctx.answerCallbackQuery();
+    await showArchivePage(ctx, name, offset);
+  });
+
+  async function showArchivePage(ctx, name, offset) {
+    const total = await countOperatorCalls(name);
 
     if (total === 0) {
-      const back = new InlineKeyboard().text('« Періоди', `arch:op:${name}`).text('« Меню', 'menu');
-      await showScreen(ctx, `${operatorLabel(name)} — ${label}\nНемає оброблених дзвінків за період.`, back);
-      await ctx.answerCallbackQuery();
+      const back = new InlineKeyboard().text('« Менеджери', 'arch:pick').text('« Меню', 'menu');
+      await showScreen(ctx, `${operatorLabel(name)}\nНемає оброблених дзвінків.`, back);
       return;
     }
 
-    const calls = await listOperatorCalls(name, start, end, PAGE, offset);
+    const calls = await listOperatorCalls(name, PAGE, offset);
     const kb = new InlineKeyboard();
     for (const c of calls) {
       const btn = isNonSales(c.callPurpose)
@@ -70,14 +75,13 @@ function registerArchive(bot) {
         : `${shortKyiv(c.startTime)} ${c.isSuccess ? '👍' : '👎'} бал ${c.communicationScore ?? '—'}`;
       kb.text(btn, `arch:call:${c.generalCallId}`).row();
     }
-    if (offset > 0) kb.text('◀', `arch:go:${period}:${Math.max(0, offset - PAGE)}:${name}`);
+    if (offset > 0) kb.text('◀', `arch:go:${Math.max(0, offset - PAGE)}:${name}`);
     kb.text(`${offset + 1}–${Math.min(offset + PAGE, total)} / ${total}`, 'noop');
-    if (offset + PAGE < total) kb.text('▶', `arch:go:${period}:${offset + PAGE}:${name}`);
-    kb.row().text('« Періоди', `arch:op:${name}`).text('« Меню', 'menu');
+    if (offset + PAGE < total) kb.text('▶', `arch:go:${offset + PAGE}:${name}`);
+    kb.row().text('« Менеджери', 'arch:pick').text('« Меню', 'menu');
 
-    await showScreen(ctx, `${operatorLabel(name)} — ${label}\nОберіть дзвінок:`, kb);
-    await ctx.answerCallbackQuery();
-  });
+    await showScreen(ctx, `${operatorLabel(name)}\nОберіть дзвінок:`, kb);
+  }
 
   bot.callbackQuery(/^arch:call:(.+)$/, async (ctx) => {
     const gid = ctx.match[1];

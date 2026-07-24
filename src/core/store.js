@@ -123,6 +123,13 @@ async function migrate() {
     ALTER TABLE calls DROP COLUMN IF EXISTS call_type;
     ALTER TABLE pending_calls DROP COLUMN IF EXISTS call_type;
 
+    -- Historical rows from before the 4-stage taxonomy was unified (Задача 2, 2026-07-23) can carry
+    -- the short pre-unification label "закриття" instead of the canonical "закриття угоди"
+    -- (core/stages.js: SALES_STAGES) - classifyCall's schema enum has only ever allowed the full
+    -- name since the unification, so this is purely a historical-data fix. Idempotent: a no-op once
+    -- applied (no row will match "закриття" again afterwards).
+    UPDATE calls SET weakest_stage = 'закриття угоди' WHERE weakest_stage = 'закриття';
+
     -- Bot access control (role system). Purely for AUTHORIZING who may use the bot and which
     -- features they see — NOT a revival of the old attribution "managers" table (Binotel stays
     -- the source of truth for who spoke on a call). role: director|marketer|manager|mechanic.
@@ -485,27 +492,27 @@ async function getBucketedTrend(name, bucket, limit = 8) {
   return rows.reverse(); // chronological (oldest → newest)
 }
 
-async function countOperatorCalls(name, start, end) {
+// All-time (no period filter) - the archive dropped its period-picker step in favor of paginating
+// straight through a manager's whole history.
+async function countOperatorCalls(name) {
   const { rows } = await pool.query(
     `SELECT COUNT(*)::int AS count FROM calls
-     WHERE manager_name = $1 AND start_time >= $2 AND start_time < $3
-       AND transcript IS NOT NULL AND transcript <> ''`,
-    [name, start, end]
+     WHERE manager_name = $1 AND transcript IS NOT NULL AND transcript <> ''`,
+    [name]
   );
   return rows[0].count;
 }
 
-async function listOperatorCalls(name, start, end, limit, offset) {
+async function listOperatorCalls(name, limit, offset) {
   const { rows } = await pool.query(
     `SELECT general_call_id AS "generalCallId", start_time AS "startTime",
             is_success AS "isSuccess", communication_score AS "communicationScore",
             call_purpose AS "callPurpose"
      FROM calls
-     WHERE manager_name = $1 AND start_time >= $2 AND start_time < $3
-       AND transcript IS NOT NULL AND transcript <> ''
+     WHERE manager_name = $1 AND transcript IS NOT NULL AND transcript <> ''
      ORDER BY start_time DESC
-     LIMIT $4 OFFSET $5`,
-    [name, start, end, limit, offset]
+     LIMIT $2 OFFSET $3`,
+    [name, limit, offset]
   );
   return rows;
 }
